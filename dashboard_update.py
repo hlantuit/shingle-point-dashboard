@@ -42,6 +42,48 @@ def divider():
     return {"object": "block", "type": "divider", "divider": {}}
  
  
+def callout(text, emoji="📌", color="gray_background"):
+    return {
+        "object": "block",
+        "type": "callout",
+        "callout": {
+            "rich_text": [{"type": "text", "text": {"content": text}}],
+            "icon": {"type": "emoji", "emoji": emoji},
+            "color": color,
+        },
+    }
+ 
+ 
+def link_paragraph(label, url):
+    """Paragraph block containing a clickable link."""
+    return {
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {
+            "rich_text": [{"type": "text", "text": {"content": label, "link": {"url": url}}}]
+        },
+    }
+ 
+ 
+def columns(*column_block_lists):
+    """
+    Builds a column_list block with N columns, each containing the given
+    list of child blocks. Notion requires all column content to be created
+    in the same request as the column_list itself — content cannot be
+    patched into columns afterward the way top-level blocks can.
+    """
+    return {
+        "object": "block",
+        "type": "column_list",
+        "column_list": {
+            "children": [
+                {"object": "block", "type": "column", "column": {"children": blocks}}
+                for blocks in column_block_lists
+            ]
+        },
+    }
+ 
+ 
 def upload_image_to_notion(image_bytes, filename="image.png"):
     """
     Uploads raw image bytes to Notion's file upload API and returns the
@@ -618,33 +660,57 @@ blocks = [
 if modis_block:
     blocks.append(modis_block)
 blocks.append(paragraph(modis_caption))
+blocks.append(divider())
  
-blocks += [
-    heading("🌡 Weather"),
-    paragraph(weather_text),
- 
-    heading("📅 Land Forecast — next 5 days"),
-    paragraph(land_forecast_text),
- 
-    heading("⚓ Marine Forecast — Yukon Coast"),
-    paragraph(marine_text),
- 
-    heading("☀️ Sunrise / Sunset"),
-    paragraph(sun_text),
- 
-    heading("📈 Temperature — last 10 days vs. 30-year average"),
+# --- Row 1: current conditions (weather) + sun, side by side ---
+weather_column = [
+    heading("🌡 Weather", level=3),
+    callout(weather_text, emoji="🌡", color="blue_background"),
 ]
+sun_column = [
+    heading("☀️ Sunrise / Sunset", level=3),
+    callout(sun_text, emoji="☀️", color="yellow_background"),
+]
+blocks.append(columns(weather_column, sun_column))
+ 
+blocks.append(divider())
+ 
+# --- Row 2: land forecast + marine forecast, side by side ---
+land_column = [
+    heading("📅 Land Forecast — next 5 days", level=3),
+    callout(land_forecast_text, emoji="📅", color="green_background"),
+]
+marine_column = [
+    heading("⚓ Marine Forecast — Yukon Coast", level=3),
+    callout(marine_text, emoji="⚓", color="purple_background"),
+]
+blocks.append(columns(land_column, marine_column))
+ 
+blocks.append(divider())
+ 
+# --- Temperature chart (full width, needs room for the image) ---
+blocks.append(heading("📈 Temperature — last 10 days vs. 30-year average"))
 if temp_chart_block:
     blocks.append(temp_chart_block)
 blocks.append(paragraph(temp_chart_caption if temp_chart_bytes else "Chart could not be generated — see Action logs."))
  
-blocks += [
-    heading("🌊 Tides & Sea Level"),
-    paragraph(tide_text),
+blocks.append(divider())
  
-    heading("🧊 Permafrost (boreholes)"),
-    paragraph("Placeholder — no live data source configured yet. Add borehole logger endpoint here when available."),
+# --- Row 3: tides + permafrost, side by side ---
+tide_column = [
+    heading("🌊 Tides & Sea Level", level=3),
+    callout(tide_text, emoji="🌊", color="blue_background"),
 ]
+permafrost_column = [
+    heading("🧊 Permafrost (boreholes)", level=3),
+    callout(
+        "Placeholder — no live data source configured yet. Add borehole logger endpoint here when available.",
+        emoji="🧊",
+        color="gray_background",
+    ),
+    link_paragraph("→ GTN-P Global Terrestrial Network for Permafrost database", "https://data.gtn-p.org/"),
+]
+blocks.append(columns(tide_column, permafrost_column))
  
 # =========================================================
 # CLEAR PAGE
