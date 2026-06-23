@@ -90,22 +90,30 @@ def build_bolded_lines(lines):
     return segments
  
  
-def callout(lines, emoji="📌", color="gray_background"):
+def callout(lines, emoji="📌", color="gray_background", children=None):
     """
     Builds a callout block from a list of lines (see build_bolded_lines).
     Accepts either a plain string (backward compatible, no bolding) or a
     list of strings/tuples/mixed-segment-lists for selective bolding.
+ 
+    children: optional list of child blocks (e.g. an image block) to nest
+    inside the callout, placed below the text. Notion callouts support
+    nested child blocks the same way column blocks do — the children must
+    be included in the same create call, not patched in afterward.
     """
     if isinstance(lines, str):
         lines = [lines]
+    callout_obj = {
+        "rich_text": build_bolded_lines(lines),
+        "icon": {"type": "emoji", "emoji": emoji},
+        "color": color,
+    }
+    if children:
+        callout_obj["children"] = children
     return {
         "object": "block",
         "type": "callout",
-        "callout": {
-            "rich_text": build_bolded_lines(lines),
-            "icon": {"type": "emoji", "emoji": emoji},
-            "color": color,
-        },
+        "callout": callout_obj,
     }
  
  
@@ -599,6 +607,103 @@ else:
  
  
 # =========================================================
+# MODULE 1b-2 — SUN POSITION CURVE (solar elevation over 24h)
+# Computed directly with the standard solar elevation formula (declination
+# + hour angle), not pulled from an external API — this is well-documented
+# astronomical math accurate to a fraction of a degree, which is more than
+# enough for a dashboard chart, and avoids depending on another service.
+# At this latitude the curve naturally shows polar day (never crosses
+# zero) or polar night (always negative) without any special-case logic —
+# the same formula handles both automatically.
+# =========================================================
+def solar_elevation_deg(lat_deg, lon_deg, dt_utc):
+    lat = math.radians(lat_deg)
+    day_of_year = dt_utc.timetuple().tm_yday
+    hour_utc = dt_utc.hour + dt_utc.minute / 60 + dt_utc.second / 3600
+ 
+    decl = math.radians(23.45 * math.sin(math.radians(360 / 365 * (day_of_year - 81))))
+    b = math.radians(360 / 365 * (day_of_year - 81))
+    eot = 9.87 * math.sin(2 * b) - 7.53 * math.cos(b) - 1.5 * math.sin(b)
+ 
+    time_correction = 4 * lon_deg + eot  # minutes
+    solar_time = hour_utc + time_correction / 60
+    hour_angle = math.radians(15 * (solar_time - 12))
+ 
+    elevation = math.asin(
+        math.sin(lat) * math.sin(decl) + math.cos(lat) * math.cos(decl) * math.cos(hour_angle)
+    )
+    return math.degrees(elevation)
+ 
+ 
+def build_sun_curve_chart():
+    """
+    Renders a 24-hour solar elevation curve (today, UTC) for Herschel
+    Island, with the current moment marked. Returns (png_bytes, caption).
+    """
+    try:
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        times = [day_start + timedelta(minutes=15 * i) for i in range(96)]
+        elevations = [solar_elevation_deg(LAT, LON, t) for t in times]
+        hour_floats = [t.hour + t.minute / 60 for t in times]
+        current_elevation = solar_elevation_deg(LAT, LON, now)
+        current_hour_float = now.hour + now.minute / 60
+ 
+        NOTION_YELLOW = "#E7B347"
+        NOTION_RED = "#E16259"
+        NOTION_TEXT_GRAY = "#787774"
+        NOTION_LIGHT_GRID = "#EDECEC"
+        NOTION_HORIZON = "#D4A72C"
+ 
+        plt.rcParams["font.family"] = "DejaVu Sans"
+        fig, ax = plt.subplots(figsize=(9, 3.6), dpi=150)
+        fig.patch.set_alpha(0)
+        ax.set_facecolor("none")
+ 
+        ax.fill_between(hour_floats, elevations, 0, where=[e > 0 for e in elevations],
+                         color=NOTION_YELLOW, alpha=0.18, linewidth=0, zorder=1)
+        ax.plot(hour_floats, elevations, linewidth=2.5, color=NOTION_YELLOW, zorder=2)
+        ax.axhline(0, color=NOTION_HORIZON, linewidth=1.2, alpha=0.6, zorder=1)
+ 
+        ax.plot([current_hour_float], [current_elevation], marker="o", markersize=8,
+                 color=NOTION_RED, markeredgecolor="white", markeredgewidth=1.5, zorder=3)
+ 
+        for spine in ["top", "right", "left"]:
+            ax.spines[spine].set_visible(False)
+        ax.spines["bottom"].set_color(NOTION_LIGHT_GRID)
+ 
+        ax.set_xlim(0, 24)
+        ax.set_xticks(range(0, 25, 3))
+        ax.set_xticklabels([f"{h:02d}:00" for h in range(0, 25, 3)], fontsize=10, color=NOTION_TEXT_GRAY)
+        ax.tick_params(axis="y", labelsize=10, colors=NOTION_TEXT_GRAY, length=0)
+        ax.tick_params(axis="x", length=0)
+        ax.yaxis.grid(True, color=NOTION_LIGHT_GRID, linewidth=1, zorder=0)
+        ax.xaxis.grid(False)
+        ax.set_axisbelow(True)
+        ax.set_ylabel("Elevation (°)", fontsize=10, color=NOTION_TEXT_GRAY)
+ 
+        fig.tight_layout()
+        png_bytes = fig_to_png_bytes(fig)
+ 
+        max_elev = max(elevations)
+        min_elev = min(elevations)
+        if min_elev > 0:
+            note = "Sun stays above the horizon all day (midnight sun)."
+        elif max_elev < 0:
+            note = "Sun stays below the horizon all day (polar night)."
+        else:
+            note = "Sun crosses the horizon today."
+        caption = f"Solar elevation today (UTC), {day_start.strftime('%b %d')}. {note} Computed from standard solar position formulas, not measured."
+        return png_bytes, caption
+ 
+    except Exception as e:
+        print("SUN CURVE CHART FAILED:", e)
+        return None, "Sun position chart could not be generated — see Action logs."
+ 
+ 
+sun_chart_bytes, sun_chart_caption = build_sun_curve_chart()
+ 
+ 
+# =========================================================
 # SHARED HELPER — Open-Meteo historical archive
 # Used by both the 10-day temperature chart and thawing degree days.
 # =========================================================
@@ -999,6 +1104,15 @@ if weather_icon_bytes:
     except Exception as e:
         print("WEATHER ICON NOTION UPLOAD FAILED:", e)
  
+sun_chart_block = None
+if sun_chart_bytes:
+    try:
+        uid = upload_image_to_notion(sun_chart_bytes, "sun_chart.png")
+        sun_chart_block = image_block_from_upload(uid)
+    except Exception as e:
+        print("SUN CHART NOTION UPLOAD FAILED:", e)
+        sun_chart_caption = "Sun chart generated but upload to Notion failed — see Action logs."
+ 
  
 # =========================================================
 # ASSEMBLE DASHBOARD BLOCKS
@@ -1017,16 +1131,27 @@ blocks.append(divider())
 # --- Row 1: current conditions (weather) + sun, side by side ---
 weather_column = [
     heading("🌡 Weather", level=3),
+    callout(
+        weather_text,
+        emoji="🌡",
+        color="blue_background",
+        children=[weather_icon_block] if weather_icon_block else None,
+    ),
 ]
-if weather_icon_block:
-    weather_column.append(weather_icon_block)
-weather_column.append(callout(weather_text, emoji="🌡", color="blue_background"))
  
 sun_column = [
     heading("☀️ Sunrise / Sunset", level=3),
     callout(sun_text, emoji="☀️", color="yellow_background"),
 ]
 blocks.append(columns(weather_column, sun_column))
+ 
+blocks.append(divider())
+ 
+# --- Sun position curve, full width since a chart needs more room than a column ---
+blocks.append(heading("📈 Sun Position — today's solar elevation"))
+if sun_chart_block:
+    blocks.append(sun_chart_block)
+blocks.append(paragraph(sun_chart_caption if sun_chart_bytes else "Sun position chart could not be generated — see Action logs."))
  
 blocks.append(divider())
  
