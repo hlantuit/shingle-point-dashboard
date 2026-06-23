@@ -365,31 +365,40 @@ else:
 # 51-57: drizzle, 61-67: rain, 71-77: snow, 80-82: showers,
 # 85-86: snow showers, 95-99: thunderstorm
 # =========================================================
-NOTION_ICON_YELLOW = (231, 179, 71)
-NOTION_ICON_GRAY = (155, 154, 151)
-NOTION_ICON_DARK_GRAY = (120, 119, 116)
-NOTION_ICON_BLUE = (51, 126, 169)
-NOTION_ICON_LIGHT_GRAY = (227, 226, 224)
-NOTION_ICON_WHITE = (255, 255, 255)
+NOTION_ICON_OUTLINE = (55, 53, 47)      # Notion's default ink color — used as a consistent outline on every icon
+NOTION_ICON_SUN = (243, 168, 49)        # more saturated than before, pops against pale backgrounds
+NOTION_ICON_CLOUD_WHITE = (255, 255, 255)
+NOTION_ICON_CLOUD_DARK = (180, 180, 178)
+NOTION_ICON_RAIN_BLUE = (33, 110, 217)  # more saturated blue, reads clearly on any background
+NOTION_ICON_FOG_GRAY = (130, 129, 126)
  
  
 def _icon_draw_sun(draw, cx, cy, r=18, color=None):
-    color = color or NOTION_ICON_YELLOW
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=color)
+    color = color or NOTION_ICON_SUN
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=color, outline=NOTION_ICON_OUTLINE, width=2)
     for i in range(8):
         angle = i * math.pi / 4
-        x1 = cx + math.cos(angle) * (r + 4)
-        y1 = cy + math.sin(angle) * (r + 4)
-        x2 = cx + math.cos(angle) * (r + 11)
-        y2 = cy + math.sin(angle) * (r + 11)
-        draw.line([(x1, y1), (x2, y2)], fill=color, width=4)
+        x1 = cx + math.cos(angle) * (r + 5)
+        y1 = cy + math.sin(angle) * (r + 5)
+        x2 = cx + math.cos(angle) * (r + 13)
+        y2 = cy + math.sin(angle) * (r + 13)
+        draw.line([(x1, y1), (x2, y2)], fill=NOTION_ICON_OUTLINE, width=3)
  
  
 def _icon_draw_cloud(draw, cx, cy, scale=1.0, color=None):
-    color = color or NOTION_ICON_LIGHT_GRAY
+    """
+    Draws a cloud with a consistent dark outline regardless of fill color,
+    by drawing each lobe slightly oversized in the outline color first,
+    then the actual fill on top at the true size — a simple stroke effect
+    that keeps the cloud legible against any background.
+    """
+    color = color or NOTION_ICON_CLOUD_WHITE
     r = 16 * scale
     bumps = [(-1.5, 0.1, 0.85), (-0.6, -0.5, 1.0), (0.4, -0.4, 1.05),
              (1.3, 0.1, 0.8), (-0.9, 0.35, 0.9), (0.9, 0.35, 0.9)]
+    for dx, dy, s in bumps:
+        rr = r * s + 2
+        draw.ellipse([cx + dx * r - rr, cy + dy * r - rr, cx + dx * r + rr, cy + dy * r + rr], fill=NOTION_ICON_OUTLINE)
     for dx, dy, s in bumps:
         rr = r * s
         draw.ellipse([cx + dx * r - rr, cy + dy * r - rr, cx + dx * r + rr, cy + dy * r + rr], fill=color)
@@ -401,31 +410,31 @@ def _icon_partly_cloudy(draw, cx, cy):
  
  
 def _icon_rain(draw, cx, cy, heavy=False):
-    _icon_draw_cloud(draw, cx, cy, color=NOTION_ICON_DARK_GRAY if heavy else NOTION_ICON_GRAY)
+    _icon_draw_cloud(draw, cx, cy, color=NOTION_ICON_CLOUD_DARK if heavy else NOTION_ICON_CLOUD_WHITE)
     offsets = [-18, -6, 6, 18] if heavy else [-14, 0, 14]
     for dx in offsets:
-        draw.line([(cx + dx, cy + 22), (cx + dx - 4, cy + 36)], fill=NOTION_ICON_BLUE, width=3)
+        draw.line([(cx + dx, cy + 22), (cx + dx - 4, cy + 36)], fill=NOTION_ICON_RAIN_BLUE, width=4)
  
  
 def _icon_snow(draw, cx, cy):
-    _icon_draw_cloud(draw, cx, cy, color=NOTION_ICON_LIGHT_GRAY)
+    _icon_draw_cloud(draw, cx, cy, color=NOTION_ICON_CLOUD_WHITE)
     for dx in [-14, 0, 14]:
         for dy in [26, 38]:
-            r = 2.5
+            r = 3
             draw.ellipse([cx + dx - r, cy + dy - r, cx + dx + r, cy + dy + r],
-                         fill=NOTION_ICON_WHITE, outline=NOTION_ICON_GRAY, width=1)
+                         fill=NOTION_ICON_CLOUD_WHITE, outline=NOTION_ICON_OUTLINE, width=1)
  
  
 def _icon_fog(draw, cx, cy):
     for i, dy in enumerate([-10, 2, 14, 26]):
         w = 28 - i * 1.5
-        draw.line([(cx - w, cy + dy), (cx + w, cy + dy)], fill=NOTION_ICON_GRAY, width=4)
+        draw.line([(cx - w, cy + dy), (cx + w, cy + dy)], fill=NOTION_ICON_FOG_GRAY, width=4)
  
  
 def _icon_thunder(draw, cx, cy):
-    _icon_draw_cloud(draw, cx, cy, color=NOTION_ICON_DARK_GRAY)
+    _icon_draw_cloud(draw, cx, cy, color=NOTION_ICON_CLOUD_DARK)
     pts = [(cx - 4, cy + 18), (cx + 6, cy + 18), (cx - 2, cy + 34), (cx + 8, cy + 34), (cx - 6, cy + 50)]
-    draw.line(pts, fill=NOTION_ICON_YELLOW, width=3, joint="curve")
+    draw.line(pts, fill=NOTION_ICON_SUN, width=4, joint="curve")
  
  
 def render_weather_icon(weathercode):
@@ -1385,3 +1394,4 @@ print("Dashboard updated successfully")
 #   netCDF4
 #   notion-client
 #   requests
+ 
