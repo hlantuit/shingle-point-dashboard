@@ -1,8 +1,11 @@
 import os
 import io
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from notion_client import Client
+import matplotlib
+matplotlib.use("Agg")  # headless backend, no display needed in CI
+import matplotlib.pyplot as plt
 
 # =========================================================
 # AUTH
@@ -80,6 +83,15 @@ def image_block_from_upload(upload_id):
     }
 
 
+def fig_to_png_bytes(fig):
+    """Renders a matplotlib figure to PNG bytes in memory, then closes it."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
 # =========================================================
 # MODULE 1 — WEATHER (temperature, wind, humidity, pressure)
 # Source: Open-Meteo current_weather + hourly (free, no key needed)
@@ -141,6 +153,254 @@ if weather["status"] == "ok":
     )
 else:
     weather_text = "Weather data unavailable — fetch failed. Check Action logs."
+
+
+# =========================================================
+# MODULE 1b — SUN: sunrise, sunset, day length
+# Source: sunrise-sunset.org (free, no key). Herschel Island is above
+# 69°N, so polar day / polar night periods are expected and handled
+# explicitly rather than treated as errors.
+# =========================================================
+def get_sun_info():
+    try:
+        url = "https://api.sunrise-sunset.org/json"
+        params = {"lat": LAT, "lng": LON, "formatted": 0}
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        print("SUN: raw response status:", data.get("status"))
+
+        if data.get("status") != "OK":
+            # status can be e.g. INVALID_REQUEST; treat as no data rather than crash
+            return {"status": "no_data", "raw_status": data.get("status")}
+
+        results = data["results"]
+        sunrise = datetime.fromisoformat(results["sunrise"].replace("Z", "+00:00"))
+        sunset = datetime.fromisoformat(results["sunset"].replace("Z", "+00:00"))
+        day_length_s = results.get("day_length")
+
+        return {
+            "status": "ok",
+            "sunrise": sunrise,
+            "sunset": sunset,
+            "day_length_s": day_length_s,
+        }
+    except Exception as e:
+        print("SUN FETCH FAILED:", e)
+        return {"status": "error"}
+
+
+sun_info = get_sun_info()
+
+# At this latitude in summer, sunrise/sunset can come back as the same
+# instant or with a day_length very close to 24h/0h — this is polar day,
+# not a bug, so we detect and label it rather than show a misleading time.
+if sun_info["status"] == "ok":
+    day_length_s = sun_info["day_length_s"]
+    hours = int(day_length_s // 3600)
+    minutes = int((day_length_s % 3600) // 60)
+
+    if day_length_s >= 23 * 3600 + 30 * 60:
+        sun_text = (
+            f"Day length: ~{hours}h {minutes}min — consistent with continuous "
+            f"daylight (midnight sun) at this latitude.\n"
+            f"Source: sunrise-sunset.org"
+        )
+    elif day_length_s <= 30 * 60:
+        sun_text = (
+            f"Day length: ~{hours}h {minutes}min — consistent with polar night "
+            f"at this latitude.\n"
+            f"Source: sunrise-sunset.org"
+        )
+    else:
+        sun_text = (
+            f"Sunrise (UTC): {sun_info['sunrise'].strftime('%H:%M')}\n"
+            f"Sunset (UTC): {sun_info['sunset'].strftime('%H:%M')}\n"
+            f"Day length: {hours}h {minutes}min\n"
+            f"Source: sunrise-sunset.org"
+        )
+elif sun_info["status"] == "no_data":
+    sun_text = f"Sun data unavailable ({sun_info.get('raw_status')}) — may be a polar-day/polar-night edge case the API can't resolve at this latitude."
+else:
+    sun_text = "Sun data fetch failed — check Action logs."
+
+
+# =========================================================
+# SHARED HELPER — Open-Meteo historical archive
+# Used by both the 10-day temperature chart and thawing degree days.
+# =========================================================
+def fetch_daily_temps(start_date, end_date):
+    """
+    Fetches daily mean temperature for [start_date, end_date] (inclusive)
+    from Open-Meteo's historical archive (ERA5 reanalysis).
+    Returns a dict {date_str: temp_c} or {} on failure.
+    """
+    try:
+        url = "https://archive-api.open-meteo.com/v1/archive"
+        params = {
+            "latitude": LAT,
+            "longitude": LON,
+            "start_date": start_date.strftime("%Y-%m-%d"),
+            "end_date": end_date.strftime("%Y-%m-%d"),
+            "daily": "temperature_2m_mean",
+            "timezone": "UTC",
+        }
+        r = requests.get(url, params=params, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        daily = data.get("daily", {})
+        times = daily.get("time", [])
+        temps = daily.get("temperature_2m_mean", [])
+        return dict(zip(times, temps))
+    except Exception as e:
+        print(f"HISTORICAL FETCH FAILED for {start_date} to {end_date}:", e)
+        return {}
+
+
+# =========================================================
+# MODULE 1c — TEMPERATURE CHART: last 10 days vs 30-year daily normal
+# =========================================================
+def build_temperature_chart():
+    """
+    Builds a chart of the last 10 days of mean daily temperature against
+    the 30-year (1996-2025) average for the same calendar days.
+
+    The 30-year normal is computed here by pulling the same 10-day
+    calendar window from each of the past 30 years and averaging —
+    Open-Meteo has no pre-computed "climate normal" endpoint, so this
+    is done as 30 separate small historical queries.
+    """
+    end = (now - timedelta(days=1)).date()  # yesterday, since today's mean isn't final yet
+    start = end - timedelta(days=9)
+
+    recent = fetch_daily_temps(start, end)
+    if not recent:
+        return None, "No recent historical temperature data returned."
+
+    day_labels = sorted(recent.keys())
+    recent_values = [recent[d] for d in day_labels]
+
+    # Build 30-year normal for the same month/day combinations
+    normals_by_day = {d: [] for d in day_labels}
+    current_year = now.year
+
+    for years_back in range(1, 31):
+        hist_start = start.replace(year=start.year - years_back)
+        hist_end = end.replace(year=end.year - years_back)
+        hist_data = fetch_daily_temps(hist_start, hist_end)
+
+        if not hist_data:
+            continue
+
+        # Map historical dates back onto this year's day labels by month/day
+        for hist_date_str, temp in hist_data.items():
+            hist_date = datetime.strptime(hist_date_str, "%Y-%m-%d").date()
+            matching_label = next(
+                (d for d in day_labels if datetime.strptime(d, "%Y-%m-%d").date().strftime("%m-%d") == hist_date.strftime("%m-%d")),
+                None,
+            )
+            if matching_label and temp is not None:
+                normals_by_day[matching_label].append(temp)
+
+    normal_values = []
+    years_used_counts = []
+    for d in day_labels:
+        vals = normals_by_day[d]
+        years_used_counts.append(len(vals))
+        normal_values.append(sum(vals) / len(vals) if vals else None)
+
+    min_years_used = min(years_used_counts) if years_used_counts else 0
+    print(f"TEMP CHART: normal built from {min_years_used}-{max(years_used_counts) if years_used_counts else 0} years of data per day")
+
+    if min_years_used < 15:
+        print("TEMP CHART: WARNING — fewer than 15 years of data available for the normal, treat with caution")
+
+    # Render chart
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    x_labels = [datetime.strptime(d, "%Y-%m-%d").strftime("%b %d") for d in day_labels]
+
+    ax.plot(x_labels, recent_values, marker="o", linewidth=2, label=f"{current_year} observed", color="#c0392b")
+    ax.plot(x_labels, normal_values, marker="o", linewidth=2, linestyle="--", label="1996-2025 average", color="#7f8c8d")
+
+    ax.set_ylabel("Mean daily temperature (°C)")
+    ax.set_title("Herschel Island — last 10 days vs. 30-year average")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    plt.xticks(rotation=45, ha="right")
+    fig.tight_layout()
+
+    png_bytes = fig_to_png_bytes(fig)
+    caption = f"Daily mean temperature, last 10 days vs. 30-year (1996-2025) average. Normal computed from {min_years_used}-{max(years_used_counts)} years of ERA5 data per calendar day."
+    return png_bytes, caption
+
+
+temp_chart_bytes, temp_chart_caption = build_temperature_chart()
+
+
+# =========================================================
+# MODULE 1d — THAWING DEGREE DAYS (TDD)
+# Cumulative sum of mean daily temps above 0°C, from Jan 1 of the
+# current year, compared against the same cumulative curve averaged
+# over the past 30 years.
+# =========================================================
+def compute_tdd_from_series(daily_temp_dict, year_start, up_to_date):
+    """
+    Given {date_str: temp_c}, computes cumulative thawing degree days
+    from year_start through up_to_date (inclusive).
+    Days with missing data are skipped (not treated as 0).
+    """
+    cumulative = 0.0
+    d = year_start
+    while d <= up_to_date:
+        d_str = d.strftime("%Y-%m-%d")
+        temp = daily_temp_dict.get(d_str)
+        if temp is not None and temp > 0:
+            cumulative += temp
+        d += timedelta(days=1)
+    return cumulative
+
+
+def build_tdd_comparison():
+    end = (now - timedelta(days=1)).date()
+    year_start_current = date(end.year, 1, 1)
+
+    current_series = fetch_daily_temps(year_start_current, end)
+    if not current_series:
+        return "No data available to compute current-year thawing degree days."
+
+    current_tdd = compute_tdd_from_series(current_series, year_start_current, end)
+
+    # 30-year average TDD-to-date (same day-of-year cutoff each year)
+    historical_tdds = []
+    for years_back in range(1, 31):
+        hist_year = end.year - years_back
+        hist_start = date(hist_year, 1, 1)
+        try:
+            hist_end = end.replace(year=hist_year)
+        except ValueError:
+            # Feb 29 in a non-leap year; fall back to Feb 28
+            hist_end = date(hist_year, 2, 28)
+
+        hist_series = fetch_daily_temps(hist_start, hist_end)
+        if hist_series:
+            historical_tdds.append(compute_tdd_from_series(hist_series, hist_start, hist_end))
+
+    if not historical_tdds:
+        return f"Current TDD: {current_tdd:.0f} °C-days (Jan 1 – {end.strftime('%b %d')}). No historical comparison available."
+
+    avg_tdd = sum(historical_tdds) / len(historical_tdds)
+    diff = current_tdd - avg_tdd
+    direction = "above" if diff > 0 else "below"
+
+    return (
+        f"Current TDD ({end.year}, Jan 1 – {end.strftime('%b %d')}): {current_tdd:.0f} °C-days\n"
+        f"30-year average TDD for the same period: {avg_tdd:.0f} °C-days\n"
+        f"Difference: {abs(diff):.0f} °C-days {direction} average (based on {len(historical_tdds)} years of data)\n"
+        f"Source: derived from Open-Meteo ERA5 historical archive"
+    )
+
+
+tdd_text = build_tdd_comparison()
 
 
 # =========================================================
@@ -402,6 +662,15 @@ if sentinel_bytes:
         print("SENTINEL-2 NOTION UPLOAD FAILED:", e)
         sentinel_caption = "Sentinel-2 scene found but upload to Notion failed — see Action logs."
 
+temp_chart_block = None
+if temp_chart_bytes:
+    try:
+        uid = upload_image_to_notion(temp_chart_bytes, "temp_chart.png")
+        temp_chart_block = image_block_from_upload(uid)
+    except Exception as e:
+        print("TEMP CHART NOTION UPLOAD FAILED:", e)
+        temp_chart_caption = "Chart generated but upload to Notion failed — see Action logs."
+
 
 # =========================================================
 # ASSEMBLE DASHBOARD BLOCKS
@@ -425,6 +694,19 @@ blocks.append(paragraph(sentinel_caption))
 blocks += [
     heading("🌡 Weather"),
     paragraph(weather_text),
+
+    heading("☀️ Sunrise / Sunset"),
+    paragraph(sun_text),
+
+    heading("📈 Temperature — last 10 days vs. 30-year average"),
+]
+if temp_chart_block:
+    blocks.append(temp_chart_block)
+blocks.append(paragraph(temp_chart_caption if temp_chart_bytes else "Chart could not be generated — see Action logs."))
+
+blocks += [
+    heading("🌱 Thawing Degree Days"),
+    paragraph(tdd_text),
 
     heading("🧊 Sea Ice Concentration"),
     paragraph(sea_ice_text),
