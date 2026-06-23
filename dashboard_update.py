@@ -627,12 +627,15 @@ def fetch_modis_image(max_days_back=5):
     return None, None
  
  
-def annotate_modis_image(png_bytes, label_lat=69.575, label_lon=-139.083, label_text="Herschel Island", scale_km=50):
+def annotate_modis_image(png_bytes, points=None, scale_km=50):
     """
-    Draws a label marker at the given coordinates and a scale bar on the
+    Draws label markers at the given coordinates and a scale bar on the
     MODIS image. Pixel position is computed from the same bbox/width/height
     used to request the image from GIBS (an equirectangular/EPSG:4326
     projection, so lon maps linearly to x and lat maps linearly to y).
+ 
+    points: list of (lat, lon, label) tuples. Defaults to Herschel Island
+    and Shingle Point if not given.
  
     The scale bar uses the latitude-adjusted km-per-degree-longitude value
     (1 degree of longitude is shorter in real km the further from the
@@ -645,6 +648,12 @@ def annotate_modis_image(png_bytes, label_lat=69.575, label_lon=-139.083, label_
     annotation fails for any reason (so a drawing bug never blocks the
     underlying satellite image from being shown).
     """
+    if points is None:
+        points = [
+            (69.575, -139.083, "Herschel Island"),
+            (68.989, -137.345, "Shingle Point"),
+        ]
+ 
     try:
         from PIL import Image, ImageDraw, ImageFont
         import io as _io
@@ -656,30 +665,34 @@ def annotate_modis_image(png_bytes, label_lat=69.575, label_lon=-139.083, label_
  
         minlon, minlat, maxlon, maxlat = map(float, BBOX_WMS.split(","))
  
-        # --- Label marker ---
-        x_frac = (label_lon - minlon) / (maxlon - minlon)
-        y_frac = 1 - (label_lat - minlat) / (maxlat - minlat)  # y=0 is top=maxlat
-        x_px = x_frac * width_px
-        y_px = y_frac * height_px
- 
         try:
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
         except Exception:
             font = ImageFont.load_default()
  
-        marker_radius = 6
-        draw.ellipse(
-            [x_px - marker_radius, y_px - marker_radius, x_px + marker_radius, y_px + marker_radius],
-            fill=(255, 60, 60), outline=(255, 255, 255), width=2,
-        )
+        # --- Label markers ---
+        for lat, lon, label_text in points:
+            x_frac = (lon - minlon) / (maxlon - minlon)
+            y_frac = 1 - (lat - minlat) / (maxlat - minlat)  # y=0 is top=maxlat
+            x_px = x_frac * width_px
+            y_px = y_frac * height_px
  
-        text_x, text_y = x_px + 12, y_px - 10
-        for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
-            draw.text((text_x + dx, text_y + dy), label_text, font=font, fill=(0, 0, 0))
-        draw.text((text_x, text_y), label_text, font=font, fill=(255, 255, 255))
+            marker_radius = 6
+            draw.ellipse(
+                [x_px - marker_radius, y_px - marker_radius, x_px + marker_radius, y_px + marker_radius],
+                fill=(255, 60, 60), outline=(255, 255, 255), width=2,
+            )
+ 
+            text_x, text_y = x_px + 12, y_px - 10
+            for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
+                draw.text((text_x + dx, text_y + dy), label_text, font=font, fill=(0, 0, 0))
+            draw.text((text_x, text_y), label_text, font=font, fill=(255, 255, 255))
  
         # --- Scale bar (bottom-left corner) ---
-        km_per_deg_lon = 111.32 * math.cos(math.radians(label_lat))
+        # Latitude correction uses the center of the bbox, not any one
+        # point's latitude, since the scale bar describes the whole image.
+        center_lat = (minlat + maxlat) / 2
+        km_per_deg_lon = 111.32 * math.cos(math.radians(center_lat))
         total_km = (maxlon - minlon) * km_per_deg_lon
         px_per_km = width_px / total_km
  
@@ -840,7 +853,7 @@ blocks.append(divider())
  
 # --- Row 2: land forecast + marine forecast, side by side ---
 land_column = [
-    heading("📅 Land Forecast — next 5 days", level=3),
+    heading("📅 Weather Forecast — next 5 days", level=3),
     callout(land_forecast_text, emoji="📅", color="green_background"),
 ]
 marine_column = [
@@ -861,7 +874,7 @@ blocks.append(divider())
  
 # --- Row 3: tides + permafrost, side by side ---
 tide_column = [
-    heading("🌊 Tides & Sea Level", level=3),
+    heading("🌊 Tides", level=3),
     callout(tide_text, emoji="🌊", color="blue_background"),
 ]
 permafrost_column = [
