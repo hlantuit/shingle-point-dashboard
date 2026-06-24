@@ -508,7 +508,7 @@ else:
 # 51-57: drizzle, 61-67: rain, 71-77: snow, 80-82: showers,
 # 85-86: snow showers, 95-99: thunderstorm
 # =========================================================
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
  
 NOTION_ICON_SIZE = 140
  
@@ -714,7 +714,7 @@ def render_wind_icon(direction_from_deg, speed_kmh):
         return None
  
  
-def render_icon_with_big_number(icon_bytes, number_text, unit_text, icon_size=100):
+def render_icon_with_big_number(icon_bytes, number_text, unit_text, icon_size=100, number_color=(40, 40, 40)):
     """
     Combines a small icon on the left with a large number + unit on the
     right, rendered as a single image. Notion's API has no per-block
@@ -722,6 +722,10 @@ def render_icon_with_big_number(icon_bytes, number_text, unit_text, icon_size=10
     genuinely large, prominent text next to an icon requires rendering it
     as an image, the same way the icons themselves are drawn — this isn't
     a workaround, it's the only way to control font size precisely here.
+ 
+    number_color: RGB tuple for the big number specifically, letting
+    callers color-code it (e.g. by temperature or wind force) while the
+    unit text stays a neutral gray.
  
     The canvas is sized generously (icon area + a wide text area) so
     that neither the icon's rays/arrows nor a wide number+unit string
@@ -758,7 +762,7 @@ def render_icon_with_big_number(icon_bytes, number_text, unit_text, icon_size=10
  
         text_x = icon_area_w + 10
         text_y = (canvas_h - num_h) // 2 - num_bbox[1]
-        draw.text((text_x, text_y), number_text, font=font_big, fill=(40, 40, 40, 255))
+        draw.text((text_x, text_y), number_text, font=font_big, fill=number_color + (255,))
  
         unit_x = text_x + num_w + 8
         unit_bbox = draw.textbbox((0, 0), unit_text, font=font_unit)
@@ -772,6 +776,70 @@ def render_icon_with_big_number(icon_bytes, number_text, unit_text, icon_size=10
     except Exception as e:
         print("ICON WITH BIG NUMBER RENDER FAILED:", e)
         return None
+ 
+ 
+def temperature_to_color(temp_c):
+    """
+    Maps a temperature in Celsius to a cold-to-hot color gradient. There
+    is no single official WMO color standard for temperature display
+    (confirmed — meteorological organizations each use their own
+    convention), so this follows the common, widely-used blue-to-red
+    convention rather than claiming a specific authoritative standard.
+    """
+    if temp_c is None:
+        return (40, 40, 40)
+    stops = [
+        (-30, (84, 130, 217)),
+        (-15, (107, 174, 230)),
+        (0, (140, 200, 230)),
+        (10, (90, 160, 110)),
+        (20, (220, 170, 50)),
+        (30, (220, 100, 50)),
+        (40, (180, 40, 40)),
+    ]
+    if temp_c <= stops[0][0]:
+        return stops[0][1]
+    if temp_c >= stops[-1][0]:
+        return stops[-1][1]
+    for i in range(len(stops) - 1):
+        t0, c0 = stops[i]
+        t1, c1 = stops[i + 1]
+        if t0 <= temp_c <= t1:
+            frac = (temp_c - t0) / (t1 - t0)
+            return tuple(round(c0[j] + (c1[j] - c0[j]) * frac) for j in range(3))
+    return (40, 40, 40)
+ 
+ 
+def windspeed_to_beaufort_color(speed_kmh):
+    """
+    Maps a wind speed in km/h to a color based on the Beaufort wind force
+    scale — a real, internationally standardized scale (defined by the
+    WMO, with identical speed-range definitions worldwide; only the
+    preferred display unit varies by country). Color progresses from
+    pale (calm) through yellow/orange (gale) to dark red (storm+).
+    Returns (color_rgb_tuple, beaufort_description).
+    """
+    if speed_kmh is None:
+        return (40, 40, 40), "—"
+    scale = [
+        (1, (180, 200, 215), "Calm"),
+        (5, (150, 190, 210), "Light air"),
+        (11, (120, 180, 190), "Light breeze"),
+        (19, (100, 170, 140), "Gentle breeze"),
+        (28, (140, 170, 80), "Moderate breeze"),
+        (38, (200, 170, 50), "Fresh breeze"),
+        (49, (220, 140, 40), "Strong breeze"),
+        (61, (220, 100, 40), "Moderate gale"),
+        (74, (200, 60, 40), "Gale"),
+        (88, (170, 40, 40), "Strong gale"),
+        (102, (140, 20, 60), "Storm"),
+        (117, (110, 10, 80), "Violent storm"),
+        (9999, (80, 0, 80), "Hurricane force"),
+    ]
+    for max_kmh, color, label in scale:
+        if speed_kmh <= max_kmh:
+            return color, label
+    return scale[-1][1], scale[-1][2]
  
  
 def render_weather_icon(weathercode):
@@ -820,6 +888,33 @@ def render_weather_icon(weathercode):
         return None
  
  
+def weathercode_to_emoji(code):
+    """
+    Maps a WMO weathercode to a representative emoji, using the same code
+    groupings as render_weather_icon, for use in contexts where an actual
+    image can't be embedded — e.g. Notion table cells, which only support
+    rich text, not nested image blocks.
+    """
+    if code is None:
+        return "—"
+    if code in (0, 1):
+        return "☀️"
+    elif code == 2:
+        return "🌤️"
+    elif code == 3:
+        return "☁️"
+    elif code in (45, 48):
+        return "🌫️"
+    elif code in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82):
+        return "🌧️"
+    elif code in (71, 73, 75, 77, 85, 86):
+        return "❄️"
+    elif code in (95, 96, 99):
+        return "⛈️"
+    else:
+        return "☁️"
+ 
+ 
 weather_icon_bytes = render_weather_icon(weather.get("weathercode")) if weather["status"] == "ok" else None
 wind_icon_bytes = (
     render_wind_icon(weather["winddirection_deg"], weather["windspeed_kmh"])
@@ -828,12 +923,22 @@ wind_icon_bytes = (
 )
  
 weather_icon_big_bytes = (
-    render_icon_with_big_number(weather_icon_bytes, f"{weather['temperature_c']:.0f}", "°C")
+    render_icon_with_big_number(
+        weather_icon_bytes, f"{weather['temperature_c']:.0f}", "°C",
+        number_color=temperature_to_color(weather["temperature_c"]),
+    )
     if weather_icon_bytes and weather.get("temperature_c") is not None
     else weather_icon_bytes
 )
+ 
+_wind_color, _beaufort_label = windspeed_to_beaufort_color(weather.get("windspeed_kmh"))
+if weather["status"] == "ok" and isinstance(wind_now_text, list):
+    wind_now_text.append(("Beaufort force: ", _beaufort_label))
 wind_icon_big_bytes = (
-    render_icon_with_big_number(wind_icon_bytes, f"{weather['windspeed_kmh']:.0f}", "km/h")
+    render_icon_with_big_number(
+        wind_icon_bytes, f"{weather['windspeed_kmh']:.0f}", "km/h",
+        number_color=_wind_color,
+    )
     if wind_icon_bytes and weather.get("windspeed_kmh") is not None
     else wind_icon_bytes
 )
@@ -956,7 +1061,7 @@ def get_land_forecast(days=5):
         params = {
             "latitude": LAT,
             "longitude": LON,
-            "daily": "temperature_2m_max,temperature_2m_min,windspeed_10m_max,winddirection_10m_dominant,precipitation_sum,weathercode",
+            "daily": "temperature_2m_max,temperature_2m_min,windspeed_10m_max,winddirection_10m_dominant,precipitation_sum,precipitation_probability_max,weathercode",
             "forecast_days": days,
             "timezone": "UTC",
         }
@@ -974,6 +1079,7 @@ def get_land_forecast(days=5):
                 "wind_max_kmh": daily["windspeed_10m_max"][i],
                 "wind_dir_deg": daily["winddirection_10m_dominant"][i],
                 "precip_mm": daily["precipitation_sum"][i],
+                "precip_prob_pct": daily.get("precipitation_probability_max", [None]*len(daily.get("time", [])))[i],
                 "weathercode": daily.get("weathercode", [None]*len(daily.get("time", [])))[i],
             })
         return days_list
@@ -992,10 +1098,11 @@ if land_forecast_days:
         compass = degrees_to_compass(d["wind_dir_deg"])
         wind_label = f"{d['wind_max_kmh']:.0f} km/h {compass or ''}".strip()
         forecast_table_rows.append([
+            weathercode_to_emoji(d["weathercode"]),
             day_label,
             ("", f"{d['temp_min']:.0f}–{d['temp_max']:.0f} °C"),
             ("", wind_label),
-            ("", f"{d['precip_mm']:.1f} mm"),
+            ("", f"{d['precip_mm']:.1f} mm" + (f" ({d['precip_prob_pct']:.0f}%)" if d.get("precip_prob_pct") is not None else "")),
         ])
         mini_strip_days.append({
             "day_label": datetime.strptime(d["date"], "%Y-%m-%d").strftime("%a"),
@@ -1004,7 +1111,7 @@ if land_forecast_days:
             "temp_max": d["temp_max"],
         })
     land_forecast_table_block = table(
-        header_cells=["Day", "Temp", "Wind", "Precip"],
+        header_cells=["", "Day", "Temp", "Wind", "Precip (chance)"],
         rows=forecast_table_rows,
     )
     land_forecast_caption = "Source: Open-Meteo"
@@ -1134,6 +1241,62 @@ if marine_entries:
     marine_text = lines + ["Source: Environment Canada (Yukon Coast marine zone)"]
 else:
     marine_text = "Marine forecast unavailable — fetch failed. Check Action logs."
+ 
+ 
+# =========================================================
+# MODULE — WEATHER & COASTAL FLOOD ALERTS (only shown if active)
+# Environment Canada publishes a per-location Atom feed (the same kind
+# of link found at the bottom of any location's Current Conditions page)
+# covering watches, warnings, and special statements — including coastal
+# flooding alerts — for that specific point. When nothing is active, the
+# feed contains a single boilerplate entry with the well-documented
+# wording "No watches or warnings in effect" (confirmed against a
+# third-party parser's real output, which recognizes this exact phrase
+# as a structured "inEffect: false" signal) — we treat that phrase as
+# the reliable signal to show nothing, rather than guess from absence of
+# entries alone (the feed may have zero or one boilerplate entry even
+# when nothing is active, depending on the exact location).
+# =========================================================
+def get_weather_alerts():
+    try:
+        import xml.etree.ElementTree as ET
+ 
+        url = f"https://weather.gc.ca/rss/alerts/{LAT}_{LON}_e.xml"
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+ 
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        root = ET.fromstring(r.content)
+ 
+        entries = []
+        for entry in root.findall("atom:entry", ns):
+            title_el = entry.find("atom:title", ns)
+            summary_el = entry.find("atom:summary", ns)
+            link_el = entry.find("atom:link", ns)
+            title = (title_el.text or "").strip() if title_el is not None else ""
+            summary = _strip_html_to_text(summary_el.text) if summary_el is not None else ""
+            link = link_el.get("href") if link_el is not None else None
+            entries.append({"title": title, "summary": summary, "link": link})
+        return entries
+    except Exception as e:
+        print("WEATHER ALERTS FETCH FAILED:", e)
+        return None  # None (fetch failed) is distinct from [] (fetched OK, no entries)
+ 
+ 
+weather_alert_entries = get_weather_alerts()
+ 
+active_alerts = []
+if weather_alert_entries is not None:
+    for e in weather_alert_entries:
+        title_lower = e["title"].lower()
+        if "no watches or warnings" in title_lower or "no alerts" in title_lower:
+            continue  # the documented boilerplate "nothing active" entry
+        active_alerts.append(e)
+ 
+if active_alerts:
+    print(f"WEATHER ALERTS: {len(active_alerts)} active alert(s) found")
+else:
+    print("WEATHER ALERTS: none active (or fetch failed) — section will be hidden")
  
  
 # =========================================================
@@ -1806,19 +1969,33 @@ def fetch_hourly_wind_chunk(start_date, end_date):
 def fetch_hourly_wind(start_date, end_date, chunk_days=10):
     """
     Fetches hourly wind speed/direction across [start_date, end_date] by
-    splitting the request into smaller chunks (default 10 days each).
-    This is more resilient than one large request: archive-api.open-meteo.com
-    has shown frequent timeouts on this project's larger historical calls,
+    splitting the request into smaller chunks (default 10 days each),
+    fetched concurrently rather than one after another. This is more
+    resilient than one large request: archive-api.open-meteo.com has
+    shown frequent timeouts on this project's larger historical calls,
     and a failure in one chunk only loses that chunk's days rather than
-    the entire requested window.
+    the entire requested window. Fetching the (typically 3) chunks
+    concurrently rather than sequentially is a small but free speed win.
     """
-    combined = {}
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+ 
+    chunk_ranges = []
     chunk_start = start_date
     while chunk_start <= end_date:
         chunk_end = min(chunk_start + timedelta(days=chunk_days - 1), end_date)
-        chunk_data = fetch_hourly_wind_chunk(chunk_start, chunk_end)
-        combined.update(chunk_data)
+        chunk_ranges.append((chunk_start, chunk_end))
         chunk_start = chunk_end + timedelta(days=1)
+ 
+    combined = {}
+    with ThreadPoolExecutor(max_workers=len(chunk_ranges) or 1) as executor:
+        futures = {executor.submit(fetch_hourly_wind_chunk, s, e): (s, e) for s, e in chunk_ranges}
+        for future in as_completed(futures):
+            s, e = futures[future]
+            try:
+                chunk_data = future.result()
+                combined.update(chunk_data)
+            except Exception as ex:
+                print(f"WIND VECTOR CHUNK FAILED for {s} to {e}:", ex)
  
     if not combined:
         print("WIND VECTOR FETCH FAILED: all chunks returned no data")
@@ -2421,17 +2598,71 @@ def stamp_timestamp(png_bytes, dt_inuvik, label="Acquired"):
         return png_bytes
  
  
-modis_bytes, modis_date = fetch_modis_image()
-if modis_bytes:
-    modis_bytes = rotate_to_north_up(modis_bytes)
-if modis_bytes:
-    modis_bytes = annotate_modis_image(modis_bytes)
-if modis_bytes and modis_date:
-    try:
-        modis_dt_utc = datetime.strptime(modis_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        modis_bytes = stamp_timestamp(modis_bytes, to_inuvik_time(modis_dt_utc.replace(tzinfo=None)), label="Acquired")
-    except Exception as e:
-        print("MODIS TIMESTAMP STAMP FAILED:", e)
+def fetch_and_process_modis():
+    """
+    Wraps the full MODIS fetch-rotate-annotate-stamp chain as a single
+    function, so it can run concurrently with the other independent
+    top-level data fetches (water level, Sentinel-1) via a thread pool,
+    rather than running sequentially before them — these three modules
+    have no data dependency on each other, so there's no reason for one
+    to wait on another to finish.
+    """
+    modis_bytes, modis_date = fetch_modis_image()
+    if modis_bytes:
+        modis_bytes = rotate_to_north_up(modis_bytes)
+    if modis_bytes:
+        modis_bytes = annotate_modis_image(modis_bytes)
+    if modis_bytes and modis_date:
+        try:
+            modis_dt_utc = datetime.strptime(modis_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            modis_bytes = stamp_timestamp(modis_bytes, to_inuvik_time(modis_dt_utc.replace(tzinfo=None)), label="Acquired")
+        except Exception as e:
+            print("MODIS TIMESTAMP STAMP FAILED:", e)
+    return modis_bytes, modis_date
+ 
+ 
+def fetch_and_process_sentinel1():
+    """
+    Wraps the full Sentinel-1 token-catalog-image-annotate-stamp chain as
+    a single function, for the same concurrent-top-level-fetch reason as
+    fetch_and_process_modis(). The internal steps stay sequential (each
+    needs the previous step's result — token before catalog search,
+    catalog search before image request), but the whole chain runs
+    concurrently with MODIS and water level.
+ 
+    Returns (sentinel1_bytes, sentinel1_caption).
+    """
+    sentinel1_bytes = None
+    sentinel1_caption = "Sentinel-1 SAR image unavailable — credentials missing or fetch failed. Check Action logs."
+ 
+    sh_token = get_sentinel_hub_token()
+    if sh_token:
+        s1_date, s1_full_datetime = find_latest_sentinel1_date(sh_token)
+        if s1_date:
+            s1_raw = fetch_sentinel1_image(sh_token, s1_date)
+            if s1_raw:
+                from PIL import Image
+                import io as _io
+                rgba_img = Image.open(_io.BytesIO(s1_raw)).convert("RGBA")
+                background = Image.new("RGBA", rgba_img.size, (50, 50, 50, 255))
+                composited = Image.alpha_composite(background, rgba_img).convert("RGB")
+                buf = _io.BytesIO()
+                composited.save(buf, format="PNG")
+                sentinel1_bytes = annotate_plain_image(
+                    buf.getvalue(), project_fn=latlon_to_utm,
+                    center_x=_HERSCHEL_UTM_X, center_y=_HERSCHEL_UTM_Y,
+                )
+                try:
+                    s1_dt_utc = datetime.strptime(s1_full_datetime[:19], "%Y-%m-%dT%H:%M:%S")
+                    sentinel1_bytes = stamp_timestamp(sentinel1_bytes, to_inuvik_time(s1_dt_utc), label="Acquired")
+                except Exception as e:
+                    print("SENTINEL-1 TIMESTAMP STAMP FAILED:", e)
+                sentinel1_caption = (
+                    f"Sentinel-1 SAR, VV decibel gamma0 (orthorectified), {s1_date}. "
+                    f"Dark gray areas are outside that day's satellite swath coverage. "
+                    f"Source: Copernicus Sentinel-1 via Sentinel Hub."
+                )
+    return sentinel1_bytes, sentinel1_caption
  
  
 # =========================================================
@@ -2481,7 +2712,7 @@ def fetch_tide_predictions(station_id, hours_ahead=24):
  
  
 station_id = find_iwls_station_id(HERSCHEL_STATION_CODE)
-tide_points = fetch_tide_predictions(station_id) if station_id else None
+tide_points = fetch_tide_predictions(station_id, hours_ahead=24*7) if station_id else None
  
 if tide_points:
     # Find the prediction point closest to right now
@@ -2558,7 +2789,9 @@ def build_tide_chart(tide_points):
  
         # Build tick positions at clean clock hours (e.g. 22:00, 04:00),
         # not fixed offsets from t0's exact minute (which previously
-        # produced labels like "22:36" instead of a round hour).
+        # produced labels like "22:36" instead of a round hour). Steps
+        # daily (24h) rather than every 6h, since the window is now 7
+        # days — 6h ticks would produce 28 crowded labels.
         first_tick_time = t0.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
         if first_tick_time < t0:
             first_tick_time += timedelta(hours=1)
@@ -2566,11 +2799,11 @@ def build_tide_chart(tide_points):
         t = first_tick_time
         while (t - t0).total_seconds() / 3600 <= max(hours):
             tick_times.append(t)
-            t += timedelta(hours=6)
+            t += timedelta(hours=24)
         tick_hours = [(t - t0).total_seconds() / 3600 for t in tick_times]
-        tick_labels = [t.astimezone(INUVIK_TZ).strftime("%H:%M") for t in tick_times]
+        tick_labels = [t.astimezone(INUVIK_TZ).strftime("%b %d") for t in tick_times]
         ax.set_xticks(tick_hours)
-        ax.set_xticklabels(tick_labels, fontsize=9, color=NOTION_TEXT_GRAY)
+        ax.set_xticklabels(tick_labels, fontsize=9, color=NOTION_TEXT_GRAY, rotation=45, ha="right")
         ax.tick_params(axis="y", labelsize=9, colors=NOTION_TEXT_GRAY, length=0)
         ax.tick_params(axis="x", length=0)
         ax.yaxis.grid(True, color=NOTION_LIGHT_GRID, linewidth=1, zorder=0)
@@ -2595,7 +2828,7 @@ def build_tide_chart(tide_points):
  
         fig.tight_layout()
         png_bytes = fig_to_png_bytes(fig)
-        caption = f"Predicted water level, next 24h, starting {t0.astimezone(INUVIK_TZ).strftime('%H:%M %Z')}. Source: DFO/CHS IWLS."
+        caption = f"Predicted water level, next 7 days, starting {t0.astimezone(INUVIK_TZ).strftime('%b %d, %H:%M %Z')}. Source: DFO/CHS IWLS."
         return png_bytes, caption
  
     except Exception as e:
@@ -2743,7 +2976,9 @@ def fetch_copernicus_water_level():
         return None, None
  
  
-copernicus_times, copernicus_values = fetch_copernicus_water_level()
+# copernicus_times, copernicus_values were already fetched concurrently
+# (alongside MODIS and Sentinel-1) earlier in the script — see the
+# ThreadPoolExecutor block above. Not re-fetched here.
  
 if copernicus_times and copernicus_values:
     current_level_total = copernicus_values[0]
@@ -2974,17 +3209,50 @@ wind_card = [
  
 tide_card = [
     heading("🌊 Tide", level=3),
-    callout(tide_text, emoji="🌊", color="blue_background"),
+    callout(
+        tide_text,
+        emoji="🌊",
+        color="blue_background",
+        children=[tide_chart_block] if tide_chart_block else None,
+    ),
+    gray_caption(tide_chart_caption if tide_chart_bytes else "Tide chart could not be generated — see Action logs."),
+    link_paragraph("Full station data →", f"https://www.tides.gc.ca/en/stations/{HERSCHEL_STATION_CODE}"),
 ]
  
 sun_card = [
     heading("☀️ Sun", level=3),
-    callout(sun_text, emoji="☀️", color="blue_background"),
+    callout(
+        sun_text,
+        emoji="☀️",
+        color="blue_background",
+        children=[sun_chart_block] if sun_chart_block else None,
+    ),
+    gray_caption(sun_chart_caption if sun_chart_bytes else "Sun position chart could not be generated — see Action logs."),
+    link_paragraph("Full sun data →", f"https://api.sunrise-sunset.org/json?lat={LAT}&lng={LON}&formatted=0"),
 ]
  
 blocks.append(columns(weather_card, wind_card))
 blocks.append(columns(tide_card, sun_card))
 blocks.append(divider())
+ 
+# --- Weather / coastal flood alerts: ONLY shown when something is active ---
+if active_alerts:
+    alert_lines = []
+    for a in active_alerts[:5]:
+        if a["summary"] and a["summary"] != a["title"]:
+            alert_lines.append([("", a["title"]), ": ", a["summary"]])
+        else:
+            alert_lines.append(a["title"])
+    alert_lines.append("Source: Environment Canada")
+ 
+    blocks.append(heading("⚠️ Active Weather Alerts"))
+    blocks.append(callout(alert_lines, emoji="⚠️", color="yellow_background"))
+    blocks.append(
+        link_paragraph("See full alert details →", active_alerts[0]["link"])
+        if active_alerts[0].get("link")
+        else paragraph("")
+    )
+    blocks.append(divider())
  
 blocks.append(heading("🛰 Satellite — MODIS True Color"))
 if modis_block:
@@ -3236,41 +3504,40 @@ def fetch_sentinel1_image(token, date_str):
 sentinel1_bytes = None
 sentinel1_caption = "Sentinel-1 SAR image unavailable — credentials missing or fetch failed. Check Action logs."
  
-sh_token = get_sentinel_hub_token()
-if sh_token:
-    s1_date, s1_full_datetime = find_latest_sentinel1_date(sh_token)
-    if s1_date:
-        s1_raw = fetch_sentinel1_image(sh_token, s1_date)
-        if s1_raw:
-            # Composite onto an opaque background first (annotate_plain_image
-            # expects RGB, not RGBA) so the transparent/uncovered areas
-            # render as a neutral gray rather than failing on mode mismatch.
-            from PIL import Image
-            import io as _io
-            rgba_img = Image.open(_io.BytesIO(s1_raw)).convert("RGBA")
-            background = Image.new("RGBA", rgba_img.size, (50, 50, 50, 255))
-            composited = Image.alpha_composite(background, rgba_img).convert("RGB")
-            buf = _io.BytesIO()
-            composited.save(buf, format="PNG")
-            # Uses annotate_plain_image (NOT annotate_modis_image), since
-            # this image is already correctly north-up from Sentinel Hub's
-            # server-side reprojection — applying MODIS's rotation logic
-            # here was the cause of a real bug (points far from center,
-            # like Shingle Point, ending up badly displaced).
-            sentinel1_bytes = annotate_plain_image(
-                buf.getvalue(), project_fn=latlon_to_utm,
-                center_x=_HERSCHEL_UTM_X, center_y=_HERSCHEL_UTM_Y,
-            )
-            try:
-                s1_dt_utc = datetime.strptime(s1_full_datetime[:19], "%Y-%m-%dT%H:%M:%S")
-                sentinel1_bytes = stamp_timestamp(sentinel1_bytes, to_inuvik_time(s1_dt_utc), label="Acquired")
-            except Exception as e:
-                print("SENTINEL-1 TIMESTAMP STAMP FAILED:", e)
-            sentinel1_caption = (
-                f"Sentinel-1 SAR, VV decibel gamma0 (orthorectified), {s1_date}. "
-                f"Dark gray areas are outside that day's satellite swath coverage. "
-                f"Source: Copernicus Sentinel-1 via Sentinel Hub."
-            )
+# Run the three independent, slow, network-bound top-level fetches
+# (MODIS, total water level, Sentinel-1) concurrently rather than one
+# after another — none of them depend on each other's output, so this
+# is a straightforward, safe speed win for the slowest part of the
+# script after the historical-data fetches. Placed here (not earlier,
+# nearer MODIS's own code) because fetch_and_process_sentinel1's inner
+# calls (get_sentinel_hub_token, find_latest_sentinel1_date,
+# fetch_sentinel1_image) and fetch_copernicus_water_level all need to
+# already be defined by the time this block actually calls them.
+from concurrent.futures import ThreadPoolExecutor as _TopLevelExecutor
+ 
+with _TopLevelExecutor(max_workers=3) as _top_level_executor:
+    _modis_future = _top_level_executor.submit(fetch_and_process_modis)
+    _water_level_future = _top_level_executor.submit(fetch_copernicus_water_level)
+    _sentinel1_future = _top_level_executor.submit(fetch_and_process_sentinel1)
+ 
+    try:
+        modis_bytes, modis_date = _modis_future.result()
+    except Exception as e:
+        print("MODIS PARALLEL FETCH FAILED:", e)
+        modis_bytes, modis_date = None, None
+ 
+    try:
+        copernicus_times, copernicus_values = _water_level_future.result()
+    except Exception as e:
+        print("WATER LEVEL PARALLEL FETCH FAILED:", e)
+        copernicus_times, copernicus_values = None, None
+ 
+    try:
+        sentinel1_bytes, sentinel1_caption = _sentinel1_future.result()
+    except Exception as e:
+        print("SENTINEL-1 PARALLEL FETCH FAILED:", e)
+        sentinel1_bytes = None
+        sentinel1_caption = "Sentinel-1 SAR image unavailable — fetch failed. Check Action logs."
  
 blocks.append(heading("🛰 Satellite — Sentinel-1 SAR (VV gamma0)"))
 sentinel1_block = None
@@ -3306,6 +3573,23 @@ blocks.append(callout(marine_text, emoji="⚓", color="purple_background"))
  
 blocks.append(divider())
  
+# --- Row: total water level (Copernicus, tide + storm surge) ---
+blocks.append(heading("🌊 Total Water Level (tide + storm surge)", level=3))
+blocks.append(callout(water_level_text, emoji="🌊", color="purple_background"))
+if water_level_chart_block:
+    blocks.append(water_level_chart_block)
+blocks.append(paragraph(water_level_chart_caption if water_level_chart_bytes else "Water level chart could not be generated — see Action logs."))
+ 
+blocks.append(divider())
+ 
+# =========================================================
+# HISTORICAL / TREND SECTIONS (past data, distinct from the forecast
+# sections above) — grouped together so forward-looking content (5-day
+# weather, marine forecast, total water level) is never interleaved
+# with backward-looking trends (30-day temperature, annual thawing
+# degree days, 30-day wind history).
+# =========================================================
+ 
 # --- Temperature chart (full width, needs room for the image) ---
 blocks.append(heading("📈 Temperature — last 30 days vs. 30-year average"))
 if temp_chart_block:
@@ -3330,31 +3614,6 @@ blocks.append(paragraph(wind_chart_caption if wind_chart_bytes else "Wind vector
  
 blocks.append(divider())
  
-# --- Sun position chart (full width) ---
-blocks.append(heading("☀️ Sun Position Today", level=3))
-if sun_chart_block:
-    blocks.append(sun_chart_block)
-blocks.append(paragraph(sun_chart_caption if sun_chart_bytes else "Sun position chart could not be generated — see Action logs."))
- 
-blocks.append(divider())
- 
-# --- Tides (full width, no longer paired with permafrost) ---
-blocks.append(heading("🌊 Tides", level=3))
-blocks.append(callout(tide_text, emoji="🌊", color="blue_background"))
-if tide_chart_block:
-    blocks.append(tide_chart_block)
-blocks.append(paragraph(tide_chart_caption if tide_chart_bytes else "Tide chart could not be generated — see Action logs."))
- 
-blocks.append(divider())
- 
-# --- Row: total water level (Copernicus, tide + storm surge) ---
-blocks.append(heading("🌊 Total Water Level (tide + storm surge)", level=3))
-blocks.append(callout(water_level_text, emoji="🌊", color="purple_background"))
-if water_level_chart_block:
-    blocks.append(water_level_chart_block)
-blocks.append(paragraph(water_level_chart_caption if water_level_chart_bytes else "Water level chart could not be generated — see Action logs."))
- 
-blocks.append(divider())
 blocks.append(disclaimer_paragraph(
     "Disclaimer: All data and imagery on this page are collated from external third-party sources "
     "(including NASA GIBS/EOSDIS, Open-Meteo, sunrise-sunset.org, Environment Canada, DFO/CHS, "
@@ -3400,4 +3659,3 @@ else:
 #   netCDF4
 #   notion-client
 #   requests
- 
