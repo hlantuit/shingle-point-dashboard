@@ -1080,9 +1080,15 @@ def rotate_to_north_up(png_bytes):
  
         img = Image.open(_io.BytesIO(png_bytes)).convert("RGB")
  
-        # PIL rotates counter-clockwise for positive angles; we computed
-        # MODIS_ROTATION_DEG as the clockwise angle needed, so negate it.
-        rotated = img.rotate(-MODIS_ROTATION_DEG, resample=Image.BICUBIC, expand=False)
+        # Empirically verified (by placing a known due-north test point in a
+        # simulated raw image and checking both signs): PIL's rotate() needs
+        # the POSITIVE angle here to bring true north to the top. The
+        # earlier comment about "PIL rotates counter-clockwise for positive
+        # angles, so negate it" was correct in isolation but led to the
+        # wrong overall result once combined with how the raw image's pixel
+        # rows map to projected y — verified empirically instead of by
+        # further sign algebra, since that's what actually caught the bug.
+        rotated = img.rotate(MODIS_ROTATION_DEG, resample=Image.BICUBIC, expand=False)
  
         # Center-crop to the final size
         w, h = rotated.size
