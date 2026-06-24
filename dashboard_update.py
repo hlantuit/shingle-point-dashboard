@@ -2976,28 +2976,6 @@ def fetch_copernicus_water_level():
         return None, None
  
  
-# copernicus_times, copernicus_values were already fetched concurrently
-# (alongside MODIS and Sentinel-1) earlier in the script — see the
-# ThreadPoolExecutor block above. Not re-fetched here.
- 
-if copernicus_times and copernicus_values:
-    current_level_total = copernicus_values[0]
-    max_level_total = max(copernicus_values)
-    min_level_total = min(copernicus_values)
-    water_level_text = [
-        ("Total water level (now): ", f"{current_level_total:.2f} m"),
-        ["Next 24h range: ", ("", f"{min_level_total:.2f} m"), " to ", ("", f"{max_level_total:.2f} m")],
-        "Includes tide + storm surge (not just astronomical tide).",
-        "Source: TOPAZ6 Arctic model (Norwegian Meteorological Institute / Copernicus Marine, ~3km, updated daily)",
-    ]
-else:
-    water_level_text = (
-        "Total water level data unavailable — the THREDDS server may be temporarily "
-        "unreachable or slow. Check Action logs. (This is separate from the Tides block "
-        "above, which uses DFO's astronomical tide predictions.)"
-    )
- 
- 
 def build_water_level_chart(times, values):
     if not times or not values:
         return None, "Total water level chart unavailable — no data."
@@ -3050,22 +3028,15 @@ def build_water_level_chart(times, values):
         return None, "Water level chart could not be generated — see Action logs."
  
  
-water_level_chart_bytes, water_level_chart_caption = build_water_level_chart(copernicus_times, copernicus_values)
+# water_level_chart_bytes/caption are built later, right after the
+# parallel executor block produces copernicus_times/copernicus_values.
  
  
 # =========================================================
 # UPLOAD ANY VALID IMAGES TO NOTION
 # =========================================================
-modis_block = None
-modis_caption = "No valid MODIS image found in the last 5 days (cloud cover or processing delay)."
-if modis_bytes:
-    try:
-        uid = upload_image_to_notion(modis_bytes, "modis.png")
-        modis_block = image_block_from_upload(uid)
-        modis_caption = f"MODIS Terra true color — {modis_date}"
-    except Exception as e:
-        print("MODIS NOTION UPLOAD FAILED:", e)
-        modis_caption = "MODIS image found but upload to Notion failed — see Action logs."
+# modis_block/modis_caption are built later, right after the parallel
+# executor block produces modis_bytes/modis_date — see below.
  
 temp_chart_block = None
 if temp_chart_bytes:
@@ -3145,13 +3116,7 @@ if tide_chart_bytes:
         tide_chart_caption = "Tide chart generated but upload to Notion failed — see Action logs."
  
 water_level_chart_block = None
-if water_level_chart_bytes:
-    try:
-        uid = upload_image_to_notion(water_level_chart_bytes, "water_level_chart.png")
-        water_level_chart_block = image_block_from_upload(uid)
-    except Exception as e:
-        print("WATER LEVEL CHART NOTION UPLOAD FAILED:", e)
-        water_level_chart_caption = "Water level chart generated but upload to Notion failed — see Action logs."
+# (built later, right after the executor block produces copernicus_times/copernicus_values — see below)
  
  
 # =========================================================
@@ -3254,22 +3219,13 @@ if active_alerts:
     )
     blocks.append(divider())
  
-blocks.append(heading("🛰 Satellite — MODIS True Color"))
-if modis_block:
-    blocks.append(modis_block)
- 
-# Link to explore the same date/location/layers interactively in NASA's
-# own Worldview tool, using its documented permalink parameters:
-# p=projection, v=viewport extent (minX,minY,maxX,maxY), l=layer list, t=date.
-worldview_date = modis_date if modis_date else now.strftime("%Y-%m-%d")
-worldview_url = (
-    f"https://worldview.earthdata.nasa.gov/?p=arctic"
-    f"&l=MODIS_Terra_CorrectedReflectance_TrueColor,Coastlines"
-    f"&t={worldview_date}"
-    f"&v={BBOX_3413}"
-)
-blocks.append(link_paragraph("Explore here →", worldview_url, prefix=f"{modis_caption}  "))
 blocks.append(divider())
+ 
+# --- MODIS section's blocks.append() calls happen later, right after the
+# parallel executor block produces modis_block/modis_date/modis_caption
+# — see below, near the Sentinel-1 section. The two are appended to
+# `blocks` in the right order there (MODIS before Sentinel-1), so the
+# page's visual layout is unaffected by this relocation. ---
  
 # --- Sentinel-1 SAR (VV decibel gamma0, orthorectified) ---
 SENTINEL1_LAYER_ID = "IW-DV-VV-DECIBEL-GAMMA0-ORTHORECTIFIED"
@@ -3539,6 +3495,61 @@ with _TopLevelExecutor(max_workers=3) as _top_level_executor:
         sentinel1_bytes = None
         sentinel1_caption = "Sentinel-1 SAR image unavailable — fetch failed. Check Action logs."
  
+if copernicus_times and copernicus_values:
+    current_level_total = copernicus_values[0]
+    max_level_total = max(copernicus_values)
+    min_level_total = min(copernicus_values)
+    water_level_text = [
+        ("Total water level (now): ", f"{current_level_total:.2f} m"),
+        ["Next 24h range: ", ("", f"{min_level_total:.2f} m"), " to ", ("", f"{max_level_total:.2f} m")],
+        "Includes tide + storm surge (not just astronomical tide).",
+        "Source: TOPAZ6 Arctic model (Norwegian Meteorological Institute / Copernicus Marine, ~3km, updated daily)",
+    ]
+else:
+    water_level_text = (
+        "Total water level data unavailable — the THREDDS server may be temporarily "
+        "unreachable or slow. Check Action logs. (This is separate from the Tides block "
+        "above, which uses DFO's astronomical tide predictions.)"
+    )
+ 
+water_level_chart_bytes, water_level_chart_caption = build_water_level_chart(copernicus_times, copernicus_values)
+ 
+modis_block = None
+modis_caption = "No valid MODIS image found in the last 5 days (cloud cover or processing delay)."
+if modis_bytes:
+    try:
+        uid = upload_image_to_notion(modis_bytes, "modis.png")
+        modis_block = image_block_from_upload(uid)
+        modis_caption = f"MODIS Terra true color — {modis_date}"
+    except Exception as e:
+        print("MODIS NOTION UPLOAD FAILED:", e)
+        modis_caption = "MODIS image found but upload to Notion failed — see Action logs."
+ 
+if water_level_chart_bytes:
+    try:
+        uid = upload_image_to_notion(water_level_chart_bytes, "water_level_chart.png")
+        water_level_chart_block = image_block_from_upload(uid)
+    except Exception as e:
+        print("WATER LEVEL CHART NOTION UPLOAD FAILED:", e)
+        water_level_chart_caption = "Water level chart generated but upload to Notion failed — see Action logs."
+ 
+blocks.append(heading("🛰 Satellite — MODIS True Color"))
+if modis_block:
+    blocks.append(modis_block)
+ 
+# Link to explore the same date/location/layers interactively in NASA's
+# own Worldview tool, using its documented permalink parameters:
+# p=projection, v=viewport extent (minX,minY,maxX,maxY), l=layer list, t=date.
+worldview_date = modis_date if modis_date else now.strftime("%Y-%m-%d")
+worldview_url = (
+    f"https://worldview.earthdata.nasa.gov/?p=arctic"
+    f"&l=MODIS_Terra_CorrectedReflectance_TrueColor,Coastlines"
+    f"&t={worldview_date}"
+    f"&v={BBOX_3413}"
+)
+blocks.append(link_paragraph("Explore here →", worldview_url, prefix=f"{modis_caption}  "))
+blocks.append(divider())
+ 
 blocks.append(heading("🛰 Satellite — Sentinel-1 SAR (VV gamma0)"))
 sentinel1_block = None
 if sentinel1_bytes:
@@ -3659,3 +3670,4 @@ else:
 #   netCDF4
 #   notion-client
 #   requests
+ 
