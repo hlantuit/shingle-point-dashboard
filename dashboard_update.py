@@ -5,6 +5,7 @@ import math
 import time
 import requests
 from datetime import datetime, timedelta, date, timezone
+from zoneinfo import ZoneInfo
 from notion_client import Client
 import matplotlib
 matplotlib.use("Agg")  # headless backend, no display needed in CI
@@ -24,7 +25,25 @@ notion = Client(auth=NOTION_TOKEN)
 LAT = 69.590
 LON = -139.099
  
+# 'now' stays naive UTC throughout the script — every API call, date
+# arithmetic ("yesterday", "last 30 days", etc.) and historical fetch
+# depends on this being UTC, so it is never converted in place. For
+# DISPLAY purposes only, INUVIK_TZ and to_inuvik_time() convert a UTC
+# datetime to local Mountain Time for Inuvik, NT — America/Inuvik
+# genuinely observes MST/MDT (unlike Yukon, which abandoned the
+# twice-yearly switch), so this is a real DST-aware conversion, not a
+# fixed offset. Verified against known transition dates: MDT (UTC-6) in
+# summer, MST (UTC-7) in winter.
+INUVIK_TZ = ZoneInfo("America/Inuvik")
+ 
+ 
+def to_inuvik_time(utc_dt):
+    """Converts a naive UTC datetime to Inuvik local time (DST-aware)."""
+    return utc_dt.replace(tzinfo=timezone.utc).astimezone(INUVIK_TZ)
+ 
+ 
 now = datetime.utcnow()
+now_inuvik = to_inuvik_time(now)
  
  
 # =========================================================
@@ -884,8 +903,8 @@ if sun_info["status"] == "ok":
         ]
     else:
         sun_text = [
-            ("Sunrise (UTC): ", sun_info['sunrise'].strftime('%H:%M')),
-            ("Sunset (UTC): ", sun_info['sunset'].strftime('%H:%M')),
+            ("Sunrise: ", sun_info['sunrise'].astimezone(INUVIK_TZ).strftime('%H:%M %Z')),
+            ("Sunset: ", sun_info['sunset'].astimezone(INUVIK_TZ).strftime('%H:%M %Z')),
             ("Day length: ", f"{hours}h {minutes}min"),
             "Source: sunrise-sunset.org",
         ]
@@ -912,16 +931,25 @@ else:
  
 def build_sun_curve_chart():
     """
-    Renders a 24-hour solar elevation curve (today, UTC) for Herschel
-    Island, with the current moment marked. Returns (png_bytes, caption).
+    Renders a 24-hour solar elevation curve for today (Inuvik local time)
+    for Herschel Island, with the current moment marked. The data window
+    spans one Inuvik calendar day (midnight to midnight local time); the
+    underlying solar position formula still operates on UTC internally
+    (as it must, since it's tied to real longitude/UTC physics), but the
+    window boundaries and all displayed labels are Inuvik-local so the
+    axis and the data genuinely correspond to the same local day.
+    Returns (png_bytes, caption).
     """
     try:
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        times = [day_start + timedelta(minutes=15 * i) for i in range(96)]
-        elevations = [solar_elevation_deg(LAT, LON, t) for t in times]
-        hour_floats = [t.hour + t.minute / 60 for t in times]
+        inuvik_day_start_local = now_inuvik.replace(hour=0, minute=0, second=0, microsecond=0)
+        times_inuvik = [inuvik_day_start_local + timedelta(minutes=15 * i) for i in range(96)]
+        times_utc = [t.astimezone(timezone.utc).replace(tzinfo=None) for t in times_inuvik]
+ 
+        elevations = [solar_elevation_deg(LAT, LON, t) for t in times_utc]
+        hour_floats = [t.hour + t.minute / 60 for t in times_inuvik]
+ 
         current_elevation = solar_elevation_deg(LAT, LON, now)
-        current_hour_float = now.hour + now.minute / 60
+        current_hour_float = now_inuvik.hour + now_inuvik.minute / 60
  
         NOTION_YELLOW = "#E7B347"
         NOTION_RED = "#E16259"
@@ -960,7 +988,7 @@ def build_sun_curve_chart():
         png_bytes = fig_to_png_bytes(fig)
  
         caption = (
-            f"Solar elevation today (UTC), {day_start.strftime('%b %d')}. "
+            f"Solar elevation today, {inuvik_day_start_local.strftime('%b %d')} (Inuvik local time). "
             f"Computed from standard solar position formulas, not measured."
         )
         return png_bytes, caption
@@ -1239,16 +1267,21 @@ def build_tdd_histogram(num_years=25):
         NOTION_RED = "#E16259"
         NOTION_LIGHT_GRID = "#EDECEC"
  
-        plotted_years = sorted(tdd_by_year.keys())
-        plotted_values = [tdd_by_year[y] for y in plotted_years]
-        colors = [NOTION_RED if y == current_year else NOTION_BLUE for y in plotted_years]
- 
         plt.rcParams["font.family"] = "DejaVu Sans"
         fig, ax = plt.subplots(figsize=(10, 4.2), dpi=150)
         fig.patch.set_alpha(0)
         ax.set_facecolor("none")
  
-        x = range(len(plotted_years))
+        full_year_range = list(range(current_year - num_years, current_year + 1))
+        plotted_values = [tdd_by_year.get(y, 0) for y in full_year_range]
+        colors = [
+            NOTION_RED if y == current_year
+            else NOTION_LIGHT_GRID if y not in tdd_by_year  # gap year: shown as a faint placeholder, not a real 0-value bar
+            else NOTION_BLUE
+            for y in full_year_range
+        ]
+ 
+        x = range(len(full_year_range))
         ax.bar(x, plotted_values, color=colors, width=0.7)
  
         for spine in ["top", "right", "left"]:
@@ -1256,7 +1289,7 @@ def build_tdd_histogram(num_years=25):
         ax.spines["bottom"].set_color(NOTION_LIGHT_GRID)
  
         ax.set_xticks(list(x))
-        ax.set_xticklabels([str(y) for y in plotted_years], fontsize=9, color=NOTION_TEXT_GRAY, rotation=45, ha="right")
+        ax.set_xticklabels([str(y) for y in full_year_range], fontsize=9, color=NOTION_TEXT_GRAY, rotation=45, ha="right")
         ax.tick_params(axis="y", labelsize=9, colors=NOTION_TEXT_GRAY, length=0)
         ax.tick_params(axis="x", length=0)
         ax.yaxis.grid(True, color=NOTION_LIGHT_GRID, linewidth=1, zorder=0)
@@ -1266,12 +1299,13 @@ def build_tdd_histogram(num_years=25):
         fig.tight_layout()
         png_bytes = fig_to_png_bytes(fig)
  
-        years_str = ", ".join(str(y) for y in plotted_years if y != current_year)
+        gap_years = [y for y in full_year_range if y not in tdd_by_year and y != current_year]
+        gap_note = f" Years with incomplete or missing data ({', '.join(str(y) for y in gap_years)}) are shown empty." if gap_years else ""
         caption = (
             f"Annual thawing degree days (sum of mean daily temperatures above 0°C, Jan 1–Dec 31), "
-            f"{plotted_years[0]}–{plotted_years[-1] - 1 if current_year in plotted_years else plotted_years[-1]}. "
+            f"{full_year_range[0]}–{full_year_range[-2]}. "
             f"Current year ({current_year}, in red) is partial: Jan 1 through {current_end.strftime('%b %d')} only, "
-            f"not directly comparable to complete-year totals. Source: Open-Meteo (ERA5)."
+            f"not directly comparable to complete-year totals.{gap_note} Source: Open-Meteo (ERA5)."
         )
         return png_bytes, caption
  
@@ -1890,7 +1924,7 @@ def build_tide_chart(tide_points):
             tick_times.append(t)
             t += timedelta(hours=6)
         tick_hours = [(t - t0).total_seconds() / 3600 for t in tick_times]
-        tick_labels = [t.strftime("%H:%M") for t in tick_times]
+        tick_labels = [t.astimezone(INUVIK_TZ).strftime("%H:%M") for t in tick_times]
         ax.set_xticks(tick_hours)
         ax.set_xticklabels(tick_labels, fontsize=9, color=NOTION_TEXT_GRAY)
         ax.tick_params(axis="y", labelsize=9, colors=NOTION_TEXT_GRAY, length=0)
@@ -1917,7 +1951,7 @@ def build_tide_chart(tide_points):
  
         fig.tight_layout()
         png_bytes = fig_to_png_bytes(fig)
-        caption = f"Predicted water level, next 24h (UTC), starting {t0.strftime('%H:%M')}. Source: DFO/CHS IWLS."
+        caption = f"Predicted water level, next 24h, starting {t0.astimezone(INUVIK_TZ).strftime('%H:%M %Z')}. Source: DFO/CHS IWLS."
         return png_bytes, caption
  
     except Exception as e:
@@ -2049,7 +2083,7 @@ def build_water_level_chart(times, values):
  
         ax.set_xlim(0, max(hours))
         tick_hours = list(range(0, int(max(hours)) + 1, 6))
-        tick_labels = [(t0 + timedelta(hours=h)).strftime("%H:%M") for h in tick_hours]
+        tick_labels = [(t0 + timedelta(hours=h)).replace(tzinfo=timezone.utc).astimezone(INUVIK_TZ).strftime("%H:%M") for h in tick_hours]
         ax.set_xticks(tick_hours)
         ax.set_xticklabels(tick_labels, fontsize=9, color=NOTION_TEXT_GRAY)
         ax.tick_params(axis="y", labelsize=9, colors=NOTION_TEXT_GRAY, length=0)
@@ -2061,7 +2095,7 @@ def build_water_level_chart(times, values):
  
         fig.tight_layout()
         png_bytes = fig_to_png_bytes(fig)
-        caption = f"Total water level (tide + storm surge), next 24h, starting {t0.strftime('%H:%M')} UTC. Source: Copernicus Marine."
+        caption = f"Total water level (tide + storm surge), next 24h, starting {(t0.replace(tzinfo=timezone.utc).astimezone(INUVIK_TZ)).strftime('%H:%M %Z')}. Source: Copernicus Marine."
         return png_bytes, caption
  
     except Exception as e:
@@ -2165,7 +2199,11 @@ attribution_column = [
 blocks = [
     columns(logo_column, attribution_column, width_ratios=[0.2, 0.8]),
     divider(),
-    paragraph(f"Last update (UTC): {now.strftime('%Y-%m-%d %H:%M')}"),
+    paragraph(f"Last update: {now_inuvik.strftime('%Y-%m-%d %H:%M %Z')}"),
+    paragraph(
+        "All times shown on this page are local Mountain Time for Inuvik, NT "
+        "(automatically adjusts for daylight saving)."
+    ),
     divider(),
  
     heading("🛰 Satellite — MODIS True Color"),
