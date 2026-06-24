@@ -204,6 +204,22 @@ def paragraph(lines):
     return {"object": "block", "paragraph": {"rich_text": build_bolded_lines(lines)}, "type": "paragraph"}
  
  
+def gray_caption(text):
+    """
+    Builds a paragraph block with gray text — the closest real equivalent
+    to 'small/de-emphasized font' for an individual block, since Notion's
+    API has no per-block font-size control (only a page-wide 'Small text'
+    toggle, which would affect everything, not just this caption).
+    """
+    if not text:
+        return paragraph("")
+    return {
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {"rich_text": [{"type": "text", "text": {"content": text}, "annotations": {"color": "gray"}}]},
+    }
+ 
+ 
 def link_paragraph(label, url, prefix=None):
     """
     Paragraph block containing a clickable link, optionally preceded by
@@ -399,7 +415,7 @@ def get_weather():
             "latitude": LAT,
             "longitude": LON,
             "current_weather": True,
-            "hourly": "relativehumidity_2m,pressure_msl",
+            "hourly": "relativehumidity_2m,pressure_msl,windspeed_10m,winddirection_10m",
             "timezone": "UTC",
         }
         r = requests.get(url, params=params, timeout=10)
@@ -417,10 +433,19 @@ def get_weather():
  
         humidity = None
         pressure = None
+        hourly_wind_forecast = None
         try:
             idx = data["hourly"]["time"].index(current_hour)
             humidity = data["hourly"]["relativehumidity_2m"][idx]
             pressure = data["hourly"]["pressure_msl"][idx]
+            # Slice the next 48h of wind forecast starting from now, for
+            # the Wind card's compact forecast chart — reuses this same
+            # request rather than a separate API call.
+            hourly_wind_forecast = {
+                "time": data["hourly"]["time"][idx:idx+49],
+                "windspeed_10m": data["hourly"]["windspeed_10m"][idx:idx+49],
+                "winddirection_10m": data["hourly"]["winddirection_10m"][idx:idx+49],
+            }
         except (ValueError, KeyError, IndexError) as e:
             print("WEATHER: could not align hourly index:", e)
  
@@ -431,6 +456,7 @@ def get_weather():
             "weathercode": cw.get("weathercode"),
             "humidity_pct": humidity,
             "pressure_hpa": pressure,
+            "hourly_wind_forecast": hourly_wind_forecast,
             "status": "ok",
         }
     except Exception as e:
@@ -442,6 +468,7 @@ def get_weather():
             "weathercode": None,
             "humidity_pct": None,
             "pressure_hpa": None,
+            "hourly_wind_forecast": None,
             "status": "missing",
         }
  
@@ -455,17 +482,18 @@ if weather["status"] == "ok":
         ("Air temperature: ", f"{weather['temperature_c']} °C"),
         ("Humidity: ", f"{weather['humidity_pct']} %"),
         ("Pressure: ", f"{weather['pressure_hpa']} hPa"),
-        "Source: Open-Meteo (ERA5-based forecast/analysis)",
     ]
+    weather_source_text = "Source: Open-Meteo (ERA5-based forecast/analysis)"
     wind_now_text = [
         ("Wind speed: ", f"{weather['windspeed_kmh']} km/h"),
         ("Wind direction: ", wind_dir_text),
-        "See 30-day wind pattern chart below.",
-        "Source: Open-Meteo (ERA5-based forecast/analysis)",
     ]
+    wind_source_text = "Source: Open-Meteo (ERA5-based forecast/analysis)"
 else:
     weather_text = "Weather data unavailable — fetch failed. Check Action logs."
+    weather_source_text = ""
     wind_now_text = "Wind data unavailable — fetch failed. Check Action logs."
+    wind_source_text = ""
  
  
 # =========================================================
@@ -617,6 +645,135 @@ def _icon_thunder():
     return img
  
  
+def _icon_wind_arrow(direction_from_deg, speed_kmh):
+    """
+    Draws an arrow icon showing wind direction and relative strength, in
+    the same gradient/shadow visual style as the weather icons. Points in
+    the direction the wind blows TOWARD (180° from the meteorological
+    "from" convention), with both length and color intensity scaling
+    with speed.
+    """
+    from PIL import ImageFilter
+ 
+    size = NOTION_ICON_SIZE
+    cx, cy = size // 2, size // 2
+ 
+    img = _icon_new_canvas()
+ 
+    min_len, max_len = 25, 48
+    length = min_len + min(speed_kmh / 40, 1.0) * (max_len - min_len)
+ 
+    angle_rad = math.radians(direction_from_deg + 180)
+    dx = math.sin(angle_rad) * length
+    dy = -math.cos(angle_rad) * length
+    tail = (cx - dx, cy - dy)
+    tip = (cx + dx, cy + dy)
+ 
+    if speed_kmh < 10:
+        color = (200, 206, 213, 255)
+    elif speed_kmh < 25:
+        color = (100, 160, 220, 255)
+    else:
+        color = (64, 110, 200, 255)
+ 
+    shadow = _icon_new_canvas()
+    sd = ImageDraw.Draw(shadow)
+    sd.line([tail, tip], fill=(0, 0, 0, 60), width=10)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(3))
+    img = Image.alpha_composite(img, shadow)
+ 
+    draw = ImageDraw.Draw(img)
+    draw.line([tail, tip], fill=color, width=7)
+ 
+    head_len = 14
+    head_angle = math.radians(28)
+    back_angle = angle_rad + math.pi
+    left = (tip[0] + head_len * math.sin(back_angle + head_angle),
+            tip[1] - head_len * math.cos(back_angle + head_angle))
+    right = (tip[0] + head_len * math.sin(back_angle - head_angle),
+             tip[1] - head_len * math.cos(back_angle - head_angle))
+    draw.polygon([tip, left, right], fill=color)
+ 
+    return img
+ 
+ 
+def render_wind_icon(direction_from_deg, speed_kmh):
+    """
+    Renders the wind direction/strength arrow as PNG bytes, or None if
+    rendering fails for any reason (so a drawing bug never blocks the
+    rest of the dashboard from updating).
+    """
+    try:
+        import io as _io
+        img = _icon_wind_arrow(direction_from_deg, speed_kmh)
+        out_buf = _io.BytesIO()
+        img.save(out_buf, format="PNG")
+        return out_buf.getvalue()
+    except Exception as e:
+        print("WIND ICON RENDER FAILED:", e)
+        return None
+ 
+ 
+def render_icon_with_big_number(icon_bytes, number_text, unit_text, icon_size=100):
+    """
+    Combines a small icon on the left with a large number + unit on the
+    right, rendered as a single image. Notion's API has no per-block
+    font-size control (only a page-wide "Small text" toggle), so getting
+    genuinely large, prominent text next to an icon requires rendering it
+    as an image, the same way the icons themselves are drawn — this isn't
+    a workaround, it's the only way to control font size precisely here.
+ 
+    The canvas is sized generously (icon area + a wide text area) so
+    that neither the icon's rays/arrows nor a wide number+unit string
+    (e.g. a negative temperature, or "km/h") can clip at the edges.
+ 
+    Returns PNG bytes, or None on failure.
+    """
+    try:
+        import io as _io
+ 
+        icon = Image.open(_io.BytesIO(icon_bytes)).convert("RGBA") if icon_bytes else None
+ 
+        canvas_h = 140
+        icon_area_w = 140
+        text_area_w = 280
+        canvas = Image.new("RGBA", (icon_area_w + text_area_w, canvas_h), (0, 0, 0, 0))
+ 
+        if icon:
+            icon_resized = icon.resize((icon_size, icon_size), Image.LANCZOS)
+            paste_x = (icon_area_w - icon_size) // 2
+            paste_y = (canvas_h - icon_size) // 2
+            canvas.paste(icon_resized, (paste_x, paste_y), icon_resized)
+ 
+        draw = ImageDraw.Draw(canvas)
+        try:
+            font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 56)
+            font_unit = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
+        except Exception:
+            font_big = font_unit = ImageFont.load_default()
+ 
+        num_bbox = draw.textbbox((0, 0), number_text, font=font_big)
+        num_w = num_bbox[2] - num_bbox[0]
+        num_h = num_bbox[3] - num_bbox[1]
+ 
+        text_x = icon_area_w + 10
+        text_y = (canvas_h - num_h) // 2 - num_bbox[1]
+        draw.text((text_x, text_y), number_text, font=font_big, fill=(40, 40, 40, 255))
+ 
+        unit_x = text_x + num_w + 8
+        unit_bbox = draw.textbbox((0, 0), unit_text, font=font_unit)
+        unit_y = text_y + num_h - (unit_bbox[3] - unit_bbox[1]) + num_bbox[1] - 2
+        draw.text((unit_x, unit_y), unit_text, font=font_unit, fill=(90, 90, 90, 255))
+ 
+        out_buf = _io.BytesIO()
+        canvas.save(out_buf, format="PNG")
+        return out_buf.getvalue()
+ 
+    except Exception as e:
+        print("ICON WITH BIG NUMBER RENDER FAILED:", e)
+        return None
+ 
+ 
 def render_weather_icon(weathercode):
     """
     Renders a small PNG icon matching the given WMO weathercode.
@@ -664,6 +821,127 @@ def render_weather_icon(weathercode):
  
  
 weather_icon_bytes = render_weather_icon(weather.get("weathercode")) if weather["status"] == "ok" else None
+wind_icon_bytes = (
+    render_wind_icon(weather["winddirection_deg"], weather["windspeed_kmh"])
+    if weather["status"] == "ok" and weather.get("winddirection_deg") is not None and weather.get("windspeed_kmh") is not None
+    else None
+)
+ 
+weather_icon_big_bytes = (
+    render_icon_with_big_number(weather_icon_bytes, f"{weather['temperature_c']:.0f}", "°C")
+    if weather_icon_bytes and weather.get("temperature_c") is not None
+    else weather_icon_bytes
+)
+wind_icon_big_bytes = (
+    render_icon_with_big_number(wind_icon_bytes, f"{weather['windspeed_kmh']:.0f}", "km/h")
+    if wind_icon_bytes and weather.get("windspeed_kmh") is not None
+    else wind_icon_bytes
+)
+ 
+ 
+def build_mini_forecast_strip(days_data):
+    """
+    Renders a compact horizontal strip: one small weather icon per day,
+    with a day label above and a temperature range below — a scannable
+    visual summary for the Weather card, reusing the same icon family as
+    the rest of the dashboard rather than introducing a new visual style.
+ 
+    days_data: list of dicts with 'day_label', 'weathercode', 'temp_min',
+    'temp_max' keys. Returns PNG bytes, or None on failure.
+    """
+    try:
+        import io as _io
+ 
+        n = len(days_data)
+        cell_w, cell_h = 100, 130
+        NOTION_BLUE_BG = (231, 243, 248)
+        canvas = Image.new("RGB", (cell_w * n, cell_h), NOTION_BLUE_BG)
+        draw = ImageDraw.Draw(canvas)
+ 
+        try:
+            font_day = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
+            font_temp = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 15)
+        except Exception:
+            font_day = font_temp = ImageFont.load_default()
+ 
+        for i, d in enumerate(days_data):
+            x0 = i * cell_w
+            icon_bytes = render_weather_icon(d["weathercode"])
+            if icon_bytes:
+                icon_img = Image.open(_io.BytesIO(icon_bytes)).convert("RGBA")
+                icon_img = icon_img.resize((64, 64), Image.LANCZOS)
+                canvas.paste(icon_img, (x0 + (cell_w - 64) // 2, 22), icon_img)
+ 
+            day_label = d["day_label"]
+            temp_label = f"{d['temp_min']:.0f}–{d['temp_max']:.0f}°"
+ 
+            day_bbox = draw.textbbox((0, 0), day_label, font=font_day)
+            draw.text((x0 + (cell_w - (day_bbox[2] - day_bbox[0])) // 2, 2), day_label, font=font_day, fill=(50, 50, 50))
+ 
+            temp_bbox = draw.textbbox((0, 0), temp_label, font=font_temp)
+            draw.text((x0 + (cell_w - (temp_bbox[2] - temp_bbox[0])) // 2, 95), temp_label, font=font_temp, fill=(70, 70, 70))
+ 
+        out_buf = _io.BytesIO()
+        canvas.save(out_buf, format="PNG")
+        return out_buf.getvalue()
+ 
+    except Exception as e:
+        print("MINI FORECAST STRIP RENDER FAILED:", e)
+        return None
+ 
+ 
+def build_wind_forecast_mini_chart(hourly_wind_forecast):
+    """
+    Builds a compact 48h wind speed forecast chart for the Wind card,
+    sized for a half-width column rather than the full-width 30-day
+    historical vector chart elsewhere on the page. Uses data already
+    fetched as part of get_weather's existing hourly request — no
+    separate API call. Returns (png_bytes, caption).
+    """
+    if not hourly_wind_forecast or not hourly_wind_forecast.get("time"):
+        return None, "Wind forecast unavailable."
+ 
+    try:
+        times = hourly_wind_forecast["time"]
+        speeds = hourly_wind_forecast["windspeed_10m"]
+        hours = list(range(len(times)))
+ 
+        NOTION_BLUE = "#337EA9"
+        NOTION_TEXT_GRAY = "#787774"
+        NOTION_LIGHT_GRID = "#EDECEC"
+ 
+        plt.rcParams["font.family"] = "DejaVu Sans"
+        fig, ax = plt.subplots(figsize=(5, 2.2), dpi=150)
+        fig.patch.set_alpha(0)
+        ax.set_facecolor("none")
+ 
+        ax.fill_between(hours, speeds, 0, color=NOTION_BLUE, alpha=0.15, linewidth=0)
+        ax.plot(hours, speeds, color=NOTION_BLUE, linewidth=2)
+ 
+        for spine in ["top", "right", "left"]:
+            ax.spines[spine].set_visible(False)
+        ax.spines["bottom"].set_color(NOTION_LIGHT_GRID)
+ 
+        max_h = max(hours) if hours else 48
+        tick_positions = [h for h in [0, 12, 24, 36, 48] if h <= max_h]
+        tick_labels = ["now" if h == 0 else f"+{h}h" for h in tick_positions]
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(tick_labels, fontsize=8, color=NOTION_TEXT_GRAY)
+        ax.tick_params(axis="y", labelsize=8, colors=NOTION_TEXT_GRAY, length=0)
+        ax.tick_params(axis="x", length=0)
+        ax.yaxis.grid(True, color=NOTION_LIGHT_GRID, linewidth=1)
+        ax.set_axisbelow(True)
+        ax.set_ylabel("km/h", fontsize=9, color=NOTION_TEXT_GRAY)
+        ax.set_ylim(0, max(speeds) * 1.2 if speeds else 10)
+ 
+        fig.tight_layout()
+        png_bytes = fig_to_png_bytes(fig)
+        caption = "Wind speed, next 48h. Source: Open-Meteo."
+        return png_bytes, caption
+ 
+    except Exception as e:
+        print("WIND FORECAST MINI CHART FAILED:", e)
+        return None, "Wind forecast chart could not be generated."
  
  
 # =========================================================
@@ -678,7 +956,7 @@ def get_land_forecast(days=5):
         params = {
             "latitude": LAT,
             "longitude": LON,
-            "daily": "temperature_2m_max,temperature_2m_min,windspeed_10m_max,winddirection_10m_dominant,precipitation_sum",
+            "daily": "temperature_2m_max,temperature_2m_min,windspeed_10m_max,winddirection_10m_dominant,precipitation_sum,weathercode",
             "forecast_days": days,
             "timezone": "UTC",
         }
@@ -696,6 +974,7 @@ def get_land_forecast(days=5):
                 "wind_max_kmh": daily["windspeed_10m_max"][i],
                 "wind_dir_deg": daily["winddirection_10m_dominant"][i],
                 "precip_mm": daily["precipitation_sum"][i],
+                "weathercode": daily.get("weathercode", [None]*len(daily.get("time", [])))[i],
             })
         return days_list
     except Exception as e:
@@ -707,6 +986,7 @@ land_forecast_days = get_land_forecast()
  
 if land_forecast_days:
     forecast_table_rows = []
+    mini_strip_days = []
     for d in land_forecast_days:
         day_label = datetime.strptime(d["date"], "%Y-%m-%d").strftime("%a %b %d")
         compass = degrees_to_compass(d["wind_dir_deg"])
@@ -717,14 +997,22 @@ if land_forecast_days:
             ("", wind_label),
             ("", f"{d['precip_mm']:.1f} mm"),
         ])
+        mini_strip_days.append({
+            "day_label": datetime.strptime(d["date"], "%Y-%m-%d").strftime("%a"),
+            "weathercode": d["weathercode"],
+            "temp_min": d["temp_min"],
+            "temp_max": d["temp_max"],
+        })
     land_forecast_table_block = table(
         header_cells=["Day", "Temp", "Wind", "Precip"],
         rows=forecast_table_rows,
     )
     land_forecast_caption = "Source: Open-Meteo"
+    mini_forecast_strip_bytes = build_mini_forecast_strip(mini_strip_days)
 else:
     land_forecast_table_block = None
     land_forecast_caption = "Land forecast unavailable — fetch failed. Check Action logs."
+    mini_forecast_strip_bytes = None
  
  
 # =========================================================
@@ -1010,8 +1298,8 @@ def build_sun_curve_chart():
         ax.plot(hour_floats, elevations, linewidth=2.5, color=NOTION_YELLOW, zorder=2)
         ax.axhline(0, color=NOTION_HORIZON, linewidth=1.2, alpha=0.6, zorder=1)
  
-        ax.plot([current_hour_float], [current_elevation], marker="o", markersize=8,
-                 color=NOTION_RED, markeredgecolor="white", markeredgewidth=1.5, zorder=3)
+        ax.plot([current_hour_float], [current_elevation], marker="o", markersize=16,
+                 color=NOTION_YELLOW, markeredgecolor=NOTION_RED, markeredgewidth=2, zorder=3)
  
         for spine in ["top", "right", "left"]:
             ax.spines[spine].set_visible(False)
@@ -1075,6 +1363,40 @@ def fetch_daily_temps(start_date, end_date):
         return {}
  
  
+def prefetch_years_concurrently(years, max_workers=8):
+    """
+    Pre-fetches any of the given years not already in the on-disk cache,
+    running up to max_workers requests concurrently rather than one at a
+    time. This is the main lever for cutting this script's total run
+    time: the 30-year temperature normal and 25-year TDD histogram were
+    previously fetching years one after another, each waiting for the
+    full HTTP round-trip (including any retries) before starting the
+    next. Open-Meteo's documented rate limit is 600 calls/minute, 5000/
+    hour — our worst case of ~50 calls across both loops is trivial
+    against that, so this concurrency is safe, not just faster.
+ 
+    Populates the shared _temp_cache (and persists newly-fetched complete
+    years to disk via the existing fetch_full_year_cached/save_temp_cache
+    machinery) — callers then read from the now-populated cache via their
+    normal sequential loop, unchanged.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+ 
+    years_to_fetch = [y for y in years if str(y) not in _temp_cache]
+    if not years_to_fetch:
+        return
+ 
+    print(f"PREFETCH: fetching {len(years_to_fetch)} uncached years concurrently (max {max_workers} at once)")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(fetch_full_year_cached, year): year for year in years_to_fetch}
+        for future in as_completed(futures):
+            year = futures[future]
+            try:
+                future.result()
+            except Exception as e:
+                print(f"PREFETCH FAILED for {year}:", e)
+ 
+ 
 def fetch_full_year_cached(year):
     """
     Returns the complete Jan 1 - Dec 31 daily temperature dict for the
@@ -1134,6 +1456,11 @@ def build_temperature_chart():
     # Build 30-year normal for the same month/day combinations
     normals_by_day = {d: [] for d in day_labels}
     current_year = now.year
+ 
+    # Pre-fetch all 30 years concurrently (rather than one at a time) —
+    # the loop below then reads from the now-populated cache.
+    prefetch_years_concurrently([end.year - yb for yb in range(1, 31)])
+ 
     years_with_data = []  # tracks which specific years actually returned data
  
     for years_back in range(1, 31):
@@ -1317,6 +1644,11 @@ def build_tdd_histogram(num_years=25):
     current_year = today.year
  
     tdd_by_year = {}
+ 
+    # Pre-fetch all needed years concurrently — for any year the
+    # temperature chart's own prefetch already cached, this is a fast
+    # no-op; only genuinely new years trigger new concurrent fetches.
+    prefetch_years_concurrently([current_year - yb for yb in range(1, num_years + 1)])
  
     # Past complete years: Jan 1 - Dec 31, via the shared full-year cache
     for years_back in range(1, num_years + 1):
@@ -1589,6 +1921,9 @@ def build_wind_vector_chart():
  
  
 wind_chart_bytes, wind_chart_caption = build_wind_vector_chart()
+wind_forecast_chart_bytes, wind_forecast_chart_caption = build_wind_forecast_mini_chart(
+    weather.get("hourly_wind_forecast") if weather["status"] == "ok" else None
+)
  
  
 # =========================================================
@@ -1739,6 +2074,64 @@ def latlon_to_3413(lat_deg, lon_deg):
     return x, y
  
  
+# UTM zone 7N (EPSG:32607) — genuinely north-up at Herschel Island's
+# longitude (-139°, well within zone 7's -138° to -132° range), unlike
+# EPSG:3413's polar stereographic projection, which is only north-up at
+# its own central meridian (-45°) and is rotated ~94° from true north at
+# our longitude. This was the actual cause of the Sentinel-1 image not
+# being north-up: requesting EPSG:3413 directly (assuming Sentinel Hub's
+# server-side reprojection would automatically be north-up) carries
+# exactly the same fundamental issue MODIS has, which is why MODIS needs
+# its separate rotate-after-fetch step. UTM avoids that problem entirely
+# for Sentinel-1, since we don't need server-side reprojection AND a
+# rotation step — just the right CRS choice.
+SENTINEL1_UTM_ZONE = 7
+SENTINEL1_UTM_EPSG = "32607"
+ 
+ 
+def latlon_to_utm(lat_deg, lon_deg, zone=SENTINEL1_UTM_ZONE):
+    """
+    Standard UTM forward projection (WGS84), verified against pyproj to
+    sub-meter precision for this project's coordinates.
+    """
+    a = 6378137.0
+    f = 1 / 298.257223563
+    e2 = f * (2 - f)
+    e4 = e2 ** 2
+    e6 = e2 ** 3
+    k0 = 0.9996
+ 
+    lat = math.radians(lat_deg)
+    lon = math.radians(lon_deg)
+    lon0 = math.radians((zone - 1) * 6 - 180 + 3)
+ 
+    N = a / math.sqrt(1 - e2 * math.sin(lat) ** 2)
+    T = math.tan(lat) ** 2
+    C = e2 / (1 - e2) * math.cos(lat) ** 2
+    A = (lon - lon0) * math.cos(lat)
+ 
+    M = a * (
+        (1 - e2 / 4 - 3 * e4 / 64 - 5 * e6 / 256) * lat
+        - (3 * e2 / 8 + 3 * e4 / 32 + 45 * e6 / 1024) * math.sin(2 * lat)
+        + (15 * e4 / 256 + 45 * e6 / 1024) * math.sin(4 * lat)
+        - (35 * e6 / 3072) * math.sin(6 * lat)
+    )
+ 
+    x = k0 * N * (A + (1 - T + C) * A ** 3 / 6 +
+                  (5 - 18 * T + T ** 2 + 72 * C - 58 * (e2 / (1 - e2))) * A ** 5 / 120) + 500000.0
+    y = k0 * (M + N * math.tan(lat) * (A ** 2 / 2 +
+              (5 - T + 9 * C + 4 * C ** 2) * A ** 4 / 24 +
+              (61 - 58 * T + T ** 2 + 600 * C - 330 * (e2 / (1 - e2))) * A ** 6 / 720))
+ 
+    if lat_deg < 0:
+        y += 10000000.0
+ 
+    return x, y
+ 
+ 
+_HERSCHEL_UTM_X, _HERSCHEL_UTM_Y = latlon_to_utm(LAT, LON)
+ 
+ 
 def annotate_modis_image(png_bytes, points=None, scale_km=50):
     """
     Draws label markers at the given coordinates and a scale bar on the
@@ -1875,18 +2268,22 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
         return png_bytes
  
  
-def annotate_plain_image(png_bytes, points=None, scale_km=50, half_width_m=150_000):
+def annotate_plain_image(png_bytes, points=None, scale_km=50, half_width_m=150_000,
+                           project_fn=None, center_x=None, center_y=None):
     """
     Draws label markers and a scale bar on an already north-up,
-    non-rotated image (e.g. Sentinel-1, which Sentinel Hub reprojects
-    server-side and returns already correctly oriented) — unlike
-    annotate_modis_image, which additionally rotates each point's offset
-    to match MODIS's own rotate-then-crop workflow. Applying that
-    MODIS-specific rotation to an image that was never actually rotated
-    was the cause of a real bug: points far from center (e.g. Shingle
-    Point) ended up badly displaced, while points near center (Herschel
-    Island, since the frame is centered on it) only had a small, easy-to-
-    miss error.
+    non-rotated image — unlike annotate_modis_image, which additionally
+    rotates each point's offset to match MODIS's own rotate-then-crop
+    workflow. Applying that MODIS-specific rotation to an image that was
+    never actually rotated was the cause of a real bug.
+ 
+    project_fn/center_x/center_y let the caller specify a different
+    projection than the EPSG:3413 default — e.g. Sentinel-1 uses UTM zone
+    7N, since that CRS is genuinely north-up at Herschel Island's
+    longitude (EPSG:3413 polar stereographic is not, except at its own
+    central meridian, which was the root cause of the Sentinel-1
+    rotation bug — requesting it directly carries the same fundamental
+    issue MODIS has, just without MODIS's compensating rotation step).
  
     points: list of (lat, lon, label) or (lat, lon, label, text_dy_offset)
     tuples. Defaults to Herschel Island and Shingle Point if not given.
@@ -1899,6 +2296,10 @@ def annotate_plain_image(png_bytes, points=None, scale_km=50, half_width_m=150_0
             (69.568861, -138.911754, "Qikiqtaruk Herschel Island", -28),
             (68.989, -137.345, "Shingle Point", -10),
         ]
+ 
+    if project_fn is None:
+        project_fn = latlon_to_3413
+        center_x, center_y = _HERSCHEL_X, _HERSCHEL_Y
  
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -1916,9 +2317,9 @@ def annotate_plain_image(png_bytes, points=None, scale_km=50, half_width_m=150_0
             font = ImageFont.load_default()
  
         def project_point(lat, lon):
-            x_m, y_m = latlon_to_3413(lat, lon)
-            dx_m = x_m - _HERSCHEL_X
-            dy_m = y_m - _HERSCHEL_Y
+            x_m, y_m = project_fn(lat, lon)
+            dx_m = x_m - center_x
+            dy_m = y_m - center_y
             # NO rotation applied here — the image is already north-up.
             x_px = width_px / 2 + dx_m / meters_per_px
             y_px = height_px / 2 - dy_m / meters_per_px
@@ -2286,7 +2687,11 @@ def fetch_copernicus_water_level():
  
         start = now
         end = now + timedelta(days=7)  # TOPAZ6 is a 10-day forecast product; 7 days gives a solid outlook with margin
-        nearby = nearby.sel(time=slice(start, end))
+ 
+        time_coords = nearby["time"].values
+        time_ascending = time_coords[0] < time_coords[-1] if len(time_coords) > 1 else True
+        time_slice = slice(start, end) if time_ascending else slice(end, start)
+        nearby = nearby.sel(time=time_slice)
  
         if nearby.size == 0:
             print("COPERNICUS WATER LEVEL: no grid cells found near Herschel Island in this window")
@@ -2455,12 +2860,36 @@ if wind_chart_bytes:
         wind_chart_caption = "Wind chart generated but upload to Notion failed — see Action logs."
  
 weather_icon_block = None
-if weather_icon_bytes:
+if weather_icon_big_bytes:
     try:
-        uid = upload_image_to_notion(weather_icon_bytes, "weather_icon.png")
+        uid = upload_image_to_notion(weather_icon_big_bytes, "weather_icon.png")
         weather_icon_block = image_block_from_upload(uid)
     except Exception as e:
         print("WEATHER ICON NOTION UPLOAD FAILED:", e)
+ 
+wind_icon_block = None
+if wind_icon_big_bytes:
+    try:
+        uid = upload_image_to_notion(wind_icon_big_bytes, "wind_icon.png")
+        wind_icon_block = image_block_from_upload(uid)
+    except Exception as e:
+        print("WIND ICON NOTION UPLOAD FAILED:", e)
+ 
+mini_forecast_strip_block = None
+if mini_forecast_strip_bytes:
+    try:
+        uid = upload_image_to_notion(mini_forecast_strip_bytes, "mini_forecast_strip.png")
+        mini_forecast_strip_block = image_block_from_upload(uid)
+    except Exception as e:
+        print("MINI FORECAST STRIP NOTION UPLOAD FAILED:", e)
+ 
+wind_forecast_chart_block = None
+if wind_forecast_chart_bytes:
+    try:
+        uid = upload_image_to_notion(wind_forecast_chart_bytes, "wind_forecast_chart.png")
+        wind_forecast_chart_block = image_block_from_upload(uid)
+    except Exception as e:
+        print("WIND FORECAST CHART NOTION UPLOAD FAILED:", e)
  
 sun_chart_block = None
 if sun_chart_bytes:
@@ -2527,13 +2956,20 @@ weather_card = [
         weather_text,
         emoji="🌡",
         color="blue_background",
-        children=[weather_icon_block] if weather_icon_block else None,
+        children=[b for b in [weather_icon_block, mini_forecast_strip_block] if b] or None,
     ),
+    gray_caption(weather_source_text),
 ]
  
 wind_card = [
     heading("🧭 Wind", level=3),
-    callout(wind_now_text, emoji="🧭", color="blue_background"),
+    callout(
+        wind_now_text,
+        emoji="🧭",
+        color="blue_background",
+        children=[b for b in [wind_icon_block, wind_forecast_chart_block] if b] or None,
+    ),
+    gray_caption(wind_source_text),
 ]
  
 tide_card = [
@@ -2712,13 +3148,17 @@ def fetch_sentinel1_image(token, date_str):
         # (±150km around Herschel Island) — NOT the oversized BBOX_3413
         # used for MODIS's own fetch-then-rotate workflow. Sentinel Hub
         # reprojects server-side and returns an already north-up image at
-        # exactly the requested bbox, so no oversized padding is needed
-        # here the way MODIS needs it for its rotation step.
+        # exactly the requested bbox — but ONLY if the requested CRS is
+        # actually north-up at this longitude. EPSG:3413 (polar
+        # stereographic) is NOT north-up here (only at its own central
+        # meridian, -45°), which was the real cause of the rotation bug.
+        # UTM zone 7N (EPSG:32607) genuinely is north-up at Herschel
+        # Island's longitude, so it's used here instead.
         plain_half_width_m = 150_000
-        minx = _HERSCHEL_X - plain_half_width_m
-        maxx = _HERSCHEL_X + plain_half_width_m
-        miny = _HERSCHEL_Y - plain_half_width_m
-        maxy = _HERSCHEL_Y + plain_half_width_m
+        minx = _HERSCHEL_UTM_X - plain_half_width_m
+        maxx = _HERSCHEL_UTM_X + plain_half_width_m
+        miny = _HERSCHEL_UTM_Y - plain_half_width_m
+        maxy = _HERSCHEL_UTM_Y + plain_half_width_m
  
         # dB range -25 to 0 mapped to 0-255 grayscale, a typical display
         # stretch for VV gamma0 (matches the documented layer's general
@@ -2746,7 +3186,7 @@ def fetch_sentinel1_image(token, date_str):
             "input": {
                 "bounds": {
                     "bbox": [minx, miny, maxx, maxy],
-                    "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/3413"},
+                    "properties": {"crs": f"http://www.opengis.net/def/crs/EPSG/0/{SENTINEL1_UTM_EPSG}"},
                 },
                 "data": [
                     {
@@ -2817,7 +3257,10 @@ if sh_token:
             # server-side reprojection — applying MODIS's rotation logic
             # here was the cause of a real bug (points far from center,
             # like Shingle Point, ending up badly displaced).
-            sentinel1_bytes = annotate_plain_image(buf.getvalue())
+            sentinel1_bytes = annotate_plain_image(
+                buf.getvalue(), project_fn=latlon_to_utm,
+                center_x=_HERSCHEL_UTM_X, center_y=_HERSCHEL_UTM_Y,
+            )
             try:
                 s1_dt_utc = datetime.strptime(s1_full_datetime[:19], "%Y-%m-%dT%H:%M:%S")
                 sentinel1_bytes = stamp_timestamp(sentinel1_bytes, to_inuvik_time(s1_dt_utc), label="Acquired")
