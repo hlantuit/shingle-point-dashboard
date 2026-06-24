@@ -2916,7 +2916,17 @@ def fetch_copernicus_water_level():
             else slice(target_y + search_radius_m, target_y - search_radius_m)
         )
  
+        # Diagnostic logging: print the dataset's REAL coordinate ranges
+        # alongside what we're requesting, so a failure's actual cause
+        # (coordinate mismatch vs. time-range mismatch vs. something else)
+        # is visible in the log instead of needing another guess.
+        print(f"COPERNICUS WATER LEVEL DEBUG: target_x={target_x:.0f}, target_y={target_y:.0f}, search_radius={search_radius_m}")
+        print(f"COPERNICUS WATER LEVEL DEBUG: dataset x range: {x_coords.min():.0f} to {x_coords.max():.0f} ({'ascending' if x_ascending else 'descending'})")
+        print(f"COPERNICUS WATER LEVEL DEBUG: dataset y range: {y_coords.min():.0f} to {y_coords.max():.0f} ({'ascending' if y_ascending else 'descending'})")
+        print(f"COPERNICUS WATER LEVEL DEBUG: requested x_slice={x_slice}, y_slice={y_slice}")
+ 
         nearby = ds["zos"].sel(x=x_slice, y=y_slice)
+        print(f"COPERNICUS WATER LEVEL DEBUG: after x/y selection, nearby size={nearby.size}, dims={dict(nearby.sizes)}")
  
         start = now
         end = now + timedelta(days=7)  # TOPAZ6 is a 10-day forecast product; 7 days gives a solid outlook with margin
@@ -2924,7 +2934,10 @@ def fetch_copernicus_water_level():
         time_coords = nearby["time"].values
         time_ascending = time_coords[0] < time_coords[-1] if len(time_coords) > 1 else True
         time_slice = slice(start, end) if time_ascending else slice(end, start)
+        print(f"COPERNICUS WATER LEVEL DEBUG: dataset time range: {time_coords.min()} to {time_coords.max()} ({'ascending' if time_ascending else 'descending'})")
+        print(f"COPERNICUS WATER LEVEL DEBUG: requested time range: {start} to {end}")
         nearby = nearby.sel(time=time_slice)
+        print(f"COPERNICUS WATER LEVEL DEBUG: after time selection, nearby size={nearby.size}, dims={dict(nearby.sizes)}")
  
         if nearby.size == 0:
             print("COPERNICUS WATER LEVEL: no grid cells found near Herschel Island in this window")
