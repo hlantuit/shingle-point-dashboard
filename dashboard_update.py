@@ -33,7 +33,6 @@ notion = Client(auth=NOTION_TOKEN)
 # script's exposure to Open-Meteo's demonstrated intermittent timeouts.
 # =========================================================
 CACHE_FILE_PATH = "cache/daily_temps_cache.json"
-YEARLY_MEAN_CACHE_PATH = "cache/water_level_yearly_mean.json"
  
  
 def load_temp_cache():
@@ -56,43 +55,6 @@ def save_temp_cache(cache):
         print(f"CACHE: failed to save {CACHE_FILE_PATH}: {e}")
  
  
-def load_cached_yearly_mean(max_age_hours=24 * 365):
-    """
-    Loads the cached water level yearly mean if it exists and isn't
-    stale (older than max_age_hours, default ~1 year). Computing this
-    value live was confirmed (via real test runs) to sometimes exceed
-    30+ seconds against the remote THREDDS server — a genuinely
-    expensive query, not a coding inefficiency — but the underlying
-    value is a slow-moving 365-day average that doesn't meaningfully
-    change run to run, so recomputing it more than about once a year is
-    unnecessary. Returns the cached mean (float), or None if missing/stale.
-    """
-    try:
-        with open(YEARLY_MEAN_CACHE_PATH, "r") as f:
-            cached = json.load(f)
-        cached_time = datetime.fromisoformat(cached["computed_at"])
-        age_hours = (datetime.utcnow() - cached_time).total_seconds() / 3600
-        if age_hours <= max_age_hours:
-            print(f"YEARLY MEAN CACHE: using cached value {cached['mean']:.3f}m, computed {age_hours:.1f}h ago")
-            return cached["mean"]
-        print(f"YEARLY MEAN CACHE: cached value is {age_hours:.1f}h old (max {max_age_hours}h), will recompute")
-        return None
-    except Exception as e:
-        print(f"YEARLY MEAN CACHE: could not load ({e}), will compute fresh")
-        return None
- 
- 
-def save_cached_yearly_mean(mean_value):
-    """Saves the computed yearly mean to disk, along with a timestamp."""
-    try:
-        os.makedirs(os.path.dirname(YEARLY_MEAN_CACHE_PATH), exist_ok=True)
-        with open(YEARLY_MEAN_CACHE_PATH, "w") as f:
-            json.dump({"mean": mean_value, "computed_at": datetime.utcnow().isoformat()}, f)
-        print(f"YEARLY MEAN CACHE: saved new value {mean_value:.3f}m")
-    except Exception as e:
-        print(f"YEARLY MEAN CACHE: failed to save: {e}")
- 
- 
 _temp_cache = load_temp_cache()
 _temp_cache_dirty = False  # tracks whether anything new was added this run, so we only write if needed
  
@@ -101,6 +63,13 @@ _temp_cache_dirty = False  # tracks whether anything new was added this run, so 
 # =========================================================
 LAT = 69.590
 LON = -139.099
+ 
+# Computed once via compute_yearly_mean_once.py (real run, not a
+# placeholder) — see that script for methodology (single nearest grid
+# point, daily-sampled across the past 365 days). Refresh by re-running
+# that script roughly once a year; the value barely changes year to
+# year, so recomputing it more often isn't necessary.
+WATER_LEVEL_YEARLY_MEAN = -0.2668  # computed 2026-06-25 via compute_yearly_mean_once.py
  
 # 'now' stays naive UTC throughout the script — every API call, date
 # arithmetic ("yesterday", "last 30 days", etc.) and historical fetch
@@ -3173,56 +3142,15 @@ def fetch_copernicus_water_level():
         # same already-open dataset, no new data source needed.
         #
         # IMPORTANT: slice by TIME first, then by point — not point first.
-        # ds["zos"].sel(x=, y=) alone, before any time restriction, asks
-        # the remote OPeNDAP server to extract a single point across the
-        # ENTIRE multi-year time axis (2018-2026) before any date
-        # filtering can be pushed down — a fundamentally more expensive
-        # remote operation than the already-narrowed `nearby` slice this
-        # function uses elsewhere, and very likely the actual cause of
-        # this feature making runs hang far longer than before it existed.
-        yearly_mean = load_cached_yearly_mean(max_age_hours=24 * 365)  # recompute at most once per year, per explicit request
-        if yearly_mean is None:
-            try:
-                import threading as _threading
- 
-                _result_holder = {}
- 
-                def _compute_yearly_mean():
-                    try:
-                        year_start = now - timedelta(days=365)
-                        year_slice_ds = ds["zos"].sel(time=slice(year_start, now))
-                        year_point = year_slice_ds.sel(x=best_point[0], y=best_point[1])
-                        year_values = year_point.values.flatten()
-                        year_values_clean = year_values[~np.isnan(year_values)]
-                        if len(year_values_clean) > 0:
-                            _result_holder["mean"] = float(np.mean(year_values_clean))
-                            _result_holder["count"] = len(year_values_clean)
-                    except Exception as inner_e:
-                        _result_holder["error"] = inner_e
- 
-                # Hard timeout: this computation has caused real,
-                # multi-minute hangs in past runs, and a live test
-                # confirmed it can genuinely exceed 30s against the
-                # remote server — not a coding bug, a genuinely expensive
-                # query. The cache above means this slow path should now
-                # be hit at most once per year, with every other run
-                # served from the fast cached value instead.
-                _t = _threading.Thread(target=_compute_yearly_mean, daemon=True)
-                _t.start()
-                _t.join(timeout=30)
- 
-                if _t.is_alive():
-                    print("COPERNICUS WATER LEVEL: yearly mean calculation timed out after 30s, skipping (will retry next run)")
-                elif "error" in _result_holder:
-                    print("COPERNICUS WATER LEVEL: yearly mean calculation failed:", _result_holder["error"])
-                elif "mean" in _result_holder:
-                    yearly_mean = _result_holder["mean"]
-                    print(f"COPERNICUS WATER LEVEL: yearly mean computed from {_result_holder['count']} valid points: {yearly_mean:.3f}m")
-                    save_cached_yearly_mean(yearly_mean)
-                else:
-                    print("COPERNICUS WATER LEVEL: no valid data in past-year window for mean calculation")
-            except Exception as e:
-                print("COPERNICUS WATER LEVEL: yearly mean calculation setup failed:", e)
+        # Yearly mean is a hardcoded constant (see WATER_LEVEL_YEARLY_MEAN
+        # near the top of this file), computed once via the separate
+        # compute_yearly_mean_once.py script rather than live on every
+        # run — this value was confirmed, via real test runs, to
+        # sometimes take 30+ seconds (and was never observed to actually
+        # finish within that window) against the remote THREDDS server,
+        # for a value that barely changes year to year. No live
+        # computation, no cache file, no timeout machinery needed.
+        yearly_mean = WATER_LEVEL_YEARLY_MEAN
  
         return times_clean, values_clean, yearly_mean
  
@@ -4127,4 +4055,3 @@ else:
 #   netCDF4
 #   notion-client
 #   requests
- 
