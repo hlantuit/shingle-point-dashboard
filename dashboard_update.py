@@ -2465,7 +2465,7 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
             (68.933333, -137.2, "Shingle Point", -28),
             (69.568861, -138.911754, "Qikiqtaruk Herschel Island", -10),
             (68.226653, -135.003294, "Aklavik", -10),
-            (68.360741, -133.723022, "Inuvik", -10),
+            (68.360741, -133.723022, "Inuvik", -10, -90),
         ]
  
     try:
@@ -2489,11 +2489,15 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
  
         # --- Label markers ---
         for point in points:
-            if len(point) == 4:
+            if len(point) == 5:
+                lat, lon, label_text, text_dy, text_dx = point
+            elif len(point) == 4:
                 lat, lon, label_text, text_dy = point
+                text_dx = 12
             else:
                 lat, lon, label_text = point
                 text_dy = -10
+                text_dx = 12
  
             x_m, y_m = latlon_to_3413(lat, lon)
             dx_m = x_m - _HERSCHEL_X
@@ -2518,7 +2522,7 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
                 fill=(255, 60, 60), outline=(255, 255, 255), width=2,
             )
  
-            text_x, text_y = x_px + 12, y_px + text_dy
+            text_x, text_y = x_px + text_dx, y_px + text_dy
             for tdx, tdy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
                 draw.text((text_x + tdx, text_y + tdy), label_text, font=font, fill=(0, 0, 0))
             draw.text((text_x, text_y), label_text, font=font, fill=(255, 255, 255))
@@ -2605,7 +2609,7 @@ def annotate_plain_image(png_bytes, points=None, scale_km=50, half_width_m=150_0
             (68.933333, -137.2, "Shingle Point", -28),
             (69.568861, -138.911754, "Qikiqtaruk Herschel Island", -10),
             (68.226653, -135.003294, "Aklavik", -10),
-            (68.360741, -133.723022, "Inuvik", -10),
+            (68.360741, -133.723022, "Inuvik", -10, -90),
         ]
  
     if project_fn is None:
@@ -2637,11 +2641,15 @@ def annotate_plain_image(png_bytes, points=None, scale_km=50, half_width_m=150_0
             return x_px, y_px
  
         for point in points:
-            if len(point) == 4:
+            if len(point) == 5:
+                lat, lon, label_text, text_dy, text_dx = point
+            elif len(point) == 4:
                 lat, lon, label_text, text_dy = point
+                text_dx = 12
             else:
                 lat, lon, label_text = point
                 text_dy = -10
+                text_dx = 12
  
             x_px, y_px = project_point(lat, lon)
  
@@ -2651,7 +2659,7 @@ def annotate_plain_image(png_bytes, points=None, scale_km=50, half_width_m=150_0
                 fill=(255, 60, 60), outline=(255, 255, 255), width=2,
             )
  
-            text_x, text_y = x_px + 12, y_px + text_dy
+            text_x, text_y = x_px + text_dx, y_px + text_dy
             for tdx, tdy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
                 draw.text((text_x + tdx, text_y + tdy), label_text, font=font, fill=(0, 0, 0))
             draw.text((text_x, text_y), label_text, font=font, fill=(255, 255, 255))
@@ -3049,7 +3057,7 @@ tide_chart_bytes, tide_chart_caption = build_tide_chart(tide_points)
 def fetch_copernicus_water_level():
     """
     Fetches the total water level (sea surface height, tide + storm surge)
-    forecast for the next ~24h near Herschel Island from the TOPAZ6
+    forecast for the next ~24h near Shingle Point from the TOPAZ6
     Arctic tide/surge model.
  
     Uses plain xarray against the public THREDDS OPeNDAP endpoint
@@ -3148,7 +3156,7 @@ def fetch_copernicus_water_level():
         print(f"COPERNICUS WATER LEVEL DEBUG: after time selection, nearby size={nearby.size}, dims={dict(nearby.sizes)}")
  
         if nearby.size == 0:
-            print("COPERNICUS WATER LEVEL: no grid cells found near Herschel Island in this window")
+            print("COPERNICUS WATER LEVEL: no grid cells found near Shingle Point in this window")
             return None, None, None
  
         # Vectorized validity check across the WHOLE x/y grid at once,
@@ -3174,10 +3182,10 @@ def fetch_copernicus_water_level():
                         best_point = (xi, yi)
  
         if best_point is None:
-            print("COPERNICUS WATER LEVEL: no valid (non-NaN) grid cells found near Herschel Island")
+            print("COPERNICUS WATER LEVEL: no valid (non-NaN) grid cells found near Shingle Point")
             return None, None, None
  
-        print(f"COPERNICUS WATER LEVEL: using grid cell at distance {best_dist:.0f}m from Herschel Island")
+        print(f"COPERNICUS WATER LEVEL: using grid cell at distance {best_dist:.0f}m from Shingle Point")
         point = nearby.sel(x=best_point[0], y=best_point[1])
  
         times = [str(t) for t in point["time"].values]
@@ -3335,16 +3343,29 @@ def fetch_discharge_data():
  
         # First line is a bilingual header, not data — skip it.
         lines = resp.text.splitlines()
+        print(f"DISCHARGE DEBUG: fetched {len(resp.content)} bytes, {len(lines)} lines total")
+        if lines:
+            print(f"DISCHARGE DEBUG: header line: {lines[0]!r}")
+        for sample_row in lines[1:4]:
+            print(f"DISCHARGE DEBUG: sample data row: {sample_row!r}")
+ 
         reader = _csv.reader(lines[1:])
  
         times = []
         values_cms = []
+        rows_seen = 0
+        rows_too_short = 0
+        rows_empty_discharge = 0
+        rows_parse_failed = 0
         for row in reader:
+            rows_seen += 1
             if len(row) < 7:
+                rows_too_short += 1
                 continue
             date_str = row[1].strip()
             discharge_str = row[6].strip()
             if not discharge_str:
+                rows_empty_discharge += 1
                 continue  # this timestamp has a water level but no discharge value
             try:
                 # Timestamps look like "2026-06-24T00:00:00-07:00" — keep
@@ -3353,12 +3374,19 @@ def fetch_discharge_data():
                 t = datetime.fromisoformat(date_str[:19])
                 v = float(discharge_str)
             except Exception:
+                rows_parse_failed += 1
                 continue
             times.append(t)
             values_cms.append(v)
  
+        print(f"DISCHARGE DEBUG: rows_seen={rows_seen}, rows_too_short={rows_too_short}, "
+              f"rows_empty_discharge={rows_empty_discharge}, rows_parse_failed={rows_parse_failed}, "
+              f"rows_kept={len(values_cms)}")
+ 
         if not values_cms:
-            print("DISCHARGE: fetch succeeded but no usable discharge values found in CSV")
+            print("DISCHARGE: fetch succeeded but no usable discharge values found in CSV "
+                  "— see DISCHARGE DEBUG lines above for the actual column layout and why "
+                  "rows were rejected (this station may not report Discharge, only Water Level)")
             return None, None
  
         print(f"DISCHARGE: parsed {len(values_cms)} daily values from {DISCHARGE_URL}")
@@ -3898,12 +3926,12 @@ def find_latest_sentinel1_date(token, lookback_days=10):
                         covering_features.append(f)
  
         if not covering_features:
-            print("SENTINEL-1: scenes found nearby, but none actually cover Herschel Island with margin")
+            print("SENTINEL-1: scenes found nearby, but none actually cover Shingle Point with margin")
             return None, None
  
         covering_features.sort(key=lambda f: f["properties"]["datetime"], reverse=True)
         latest_datetime = covering_features[0]["properties"]["datetime"]
-        print(f"SENTINEL-1: latest scene covering Herschel Island: {latest_datetime}")
+        print(f"SENTINEL-1: latest scene covering Shingle Point: {latest_datetime}")
         return latest_datetime[:10], latest_datetime  # (YYYY-MM-DD for the request, full datetime for display)
  
     except Exception as e:
@@ -4142,10 +4170,10 @@ _discharge_blocks.append(divider())
  
 _total_water_level_blocks.extend(_discharge_blocks)
  
-blocks.append(heading("🛰 Satellite View of the Island"))
+blocks.append(heading("🛰 Satellite View of Shingle Point"))
 if modis_block:
     blocks.append(modis_block)
-blocks.append(paragraph(f"A real satellite photo of Herschel Island, taken on {modis_date if modis_date else 'a recent date'}."))
+blocks.append(paragraph(f"A real satellite photo of Shingle Point, taken on {modis_date if modis_date else 'a recent date'}."))
  
 # Link to explore the same date/location/layers interactively in NASA's
 # own Worldview tool, using its documented permalink parameters:
@@ -4161,7 +4189,7 @@ blocks.append(gray_caption(modis_caption))
 blocks.append(link_paragraph("Explore here →", worldview_url))
 blocks.append(divider())
  
-blocks.append(heading("🛰 Radar View of the Island"))
+blocks.append(heading("🛰 Radar View of Shingle Point"))
 sentinel1_block = None
 if sentinel1_bytes:
     try:
@@ -4173,7 +4201,7 @@ if sentinel1_bytes:
 if sentinel1_block:
     blocks.append(sentinel1_block)
 blocks.append(paragraph(
-    "A radar image of the island, which can see through cloud and darkness — useful when "
+    "A radar image of Shingle Point, which can see through cloud and darkness — useful when "
     "the regular satellite photo above is blocked by weather. Gray areas were outside the "
     "satellite's path that day."
 ))
@@ -4275,3 +4303,4 @@ else:
 #   netCDF4
 #   notion-client
 #   requests
+ 
