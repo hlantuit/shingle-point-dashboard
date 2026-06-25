@@ -660,7 +660,7 @@ def _icon_wind_arrow(direction_from_deg, speed_kmh):
  
     img = _icon_new_canvas()
  
-    min_len, max_len = 25, 48
+    min_len, max_len = 45, 65
     length = min_len + min(speed_kmh / 40, 1.0) * (max_len - min_len)
  
     angle_rad = math.radians(direction_from_deg + 180)
@@ -678,14 +678,14 @@ def _icon_wind_arrow(direction_from_deg, speed_kmh):
  
     shadow = _icon_new_canvas()
     sd = ImageDraw.Draw(shadow)
-    sd.line([tail, tip], fill=(0, 0, 0, 60), width=10)
-    shadow = shadow.filter(ImageFilter.GaussianBlur(3))
+    sd.line([tail, tip], fill=(0, 0, 0, 70), width=16)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(4))
     img = Image.alpha_composite(img, shadow)
  
     draw = ImageDraw.Draw(img)
-    draw.line([tail, tip], fill=color, width=7)
+    draw.line([tail, tip], fill=color, width=12)
  
-    head_len = 14
+    head_len = 22
     head_angle = math.radians(28)
     back_angle = angle_rad + math.pi
     left = (tip[0] + head_len * math.sin(back_angle + head_angle),
@@ -714,22 +714,25 @@ def render_wind_icon(direction_from_deg, speed_kmh):
         return None
  
  
-def render_icon_with_big_number(icon_bytes, number_text, unit_text, icon_size=100, number_color=(40, 40, 40)):
+def render_icon_with_big_number(icon_bytes, number_text, unit_text, icon_size=90, number_color=(40, 40, 40)):
     """
     Combines a small icon on the left with a large number + unit on the
-    right, rendered as a single image. Notion's API has no per-block
-    font-size control (only a page-wide "Small text" toggle), so getting
-    genuinely large, prominent text next to an icon requires rendering it
-    as an image, the same way the icons themselves are drawn — this isn't
-    a workaround, it's the only way to control font size precisely here.
+    right, rendered as a single image, cropped TIGHTLY to actual content
+    rather than a fixed oversized canvas.
+ 
+    Why tight cropping matters: Notion has no per-block image width
+    control — it always scales the whole image to fill the available
+    column width. A canvas with a lot of empty transparent margin around
+    the real content (icon + number) meant that margin got scaled along
+    with everything else, so the actual number ended up much smaller on
+    screen than its own font size would suggest, especially in a
+    half-width column. Cropping to content means nearly every pixel of
+    the final image is meaningful, so the same display width shows
+    dramatically larger text.
  
     number_color: RGB tuple for the big number specifically, letting
     callers color-code it (e.g. by temperature or wind force) while the
     unit text stays a neutral gray.
- 
-    The canvas is sized generously (icon area + a wide text area) so
-    that neither the icon's rays/arrows nor a wide number+unit string
-    (e.g. a negative temperature, or "km/h") can clip at the edges.
  
     Returns PNG bytes, or None on failure.
     """
@@ -738,35 +741,41 @@ def render_icon_with_big_number(icon_bytes, number_text, unit_text, icon_size=10
  
         icon = Image.open(_io.BytesIO(icon_bytes)).convert("RGBA") if icon_bytes else None
  
-        canvas_h = 140
-        icon_area_w = 140
-        text_area_w = 280
-        canvas = Image.new("RGBA", (icon_area_w + text_area_w, canvas_h), (0, 0, 0, 0))
- 
-        if icon:
-            icon_resized = icon.resize((icon_size, icon_size), Image.LANCZOS)
-            paste_x = (icon_area_w - icon_size) // 2
-            paste_y = (canvas_h - icon_size) // 2
-            canvas.paste(icon_resized, (paste_x, paste_y), icon_resized)
- 
-        draw = ImageDraw.Draw(canvas)
         try:
-            font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 56)
-            font_unit = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
+            font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 72)
+            font_unit = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32)
         except Exception:
             font_big = font_unit = ImageFont.load_default()
  
-        num_bbox = draw.textbbox((0, 0), number_text, font=font_big)
-        num_w = num_bbox[2] - num_bbox[0]
-        num_h = num_bbox[3] - num_bbox[1]
+        # Measure actual text size first, on a throwaway canvas, so the
+        # real canvas can be sized exactly to fit (plus small margins).
+        _tmp = Image.new("RGBA", (10, 10))
+        _tmp_draw = ImageDraw.Draw(_tmp)
+        num_bbox = _tmp_draw.textbbox((0, 0), number_text, font=font_big)
+        num_w, num_h = num_bbox[2] - num_bbox[0], num_bbox[3] - num_bbox[1]
+        unit_bbox = _tmp_draw.textbbox((0, 0), unit_text, font=font_unit)
+        unit_w, unit_h = unit_bbox[2] - unit_bbox[0], unit_bbox[3] - unit_bbox[1]
  
-        text_x = icon_area_w + 10
+        margin = 8
+        gap_icon_text = 14
+        gap_num_unit = 6
+ 
+        canvas_h = max(icon_size, num_h) + margin * 2
+        canvas_w = margin + icon_size + gap_icon_text + num_w + gap_num_unit + unit_w + margin
+        canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+ 
+        if icon:
+            icon_resized = icon.resize((icon_size, icon_size), Image.LANCZOS)
+            paste_y = (canvas_h - icon_size) // 2
+            canvas.paste(icon_resized, (margin, paste_y), icon_resized)
+ 
+        draw = ImageDraw.Draw(canvas)
+        text_x = margin + icon_size + gap_icon_text
         text_y = (canvas_h - num_h) // 2 - num_bbox[1]
         draw.text((text_x, text_y), number_text, font=font_big, fill=number_color + (255,))
  
-        unit_x = text_x + num_w + 8
-        unit_bbox = draw.textbbox((0, 0), unit_text, font=font_unit)
-        unit_y = text_y + num_h - (unit_bbox[3] - unit_bbox[1]) + num_bbox[1] - 2
+        unit_x = text_x + num_w + gap_num_unit
+        unit_y = text_y + num_h - unit_h + num_bbox[1] - unit_bbox[1] - 2
         draw.text((unit_x, unit_y), unit_text, font=font_unit, fill=(90, 90, 90, 255))
  
         out_buf = _io.BytesIO()
@@ -2929,7 +2938,7 @@ def fetch_copernicus_water_level():
         print(f"COPERNICUS WATER LEVEL DEBUG: after x/y selection, nearby size={nearby.size}, dims={dict(nearby.sizes)}")
  
         start = now
-        end = now + timedelta(days=7)  # TOPAZ6 is a 10-day forecast product; 7 days gives a solid outlook with margin
+        end = now + timedelta(days=10)  # full 10-day TOPAZ6 forecast horizon
  
         time_coords = nearby["time"].values
         time_ascending = time_coords[0] < time_coords[-1] if len(time_coords) > 1 else True
@@ -3161,6 +3170,7 @@ blocks = [
 # comes first, before any imagery — each card shows only the current
 # value, no charts. The fuller 30-day/multi-day charts for wind and tide
 # remain further down the page in their own detailed sections, unchanged.
+_todays_conditions_insertion_index = len(blocks)
 blocks.append(heading("📍 Today's Conditions"))
  
 weather_card = [
@@ -3172,6 +3182,7 @@ weather_card = [
         children=[b for b in [weather_icon_block, mini_forecast_strip_block] if b] or None,
     ),
     gray_caption(weather_source_text),
+    link_paragraph("Full weather data →", f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&current=temperature_2m,relative_humidity_2m,pressure_msl&daily=temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=auto"),
 ]
  
 wind_card = [
@@ -3183,6 +3194,7 @@ wind_card = [
         children=[b for b in [wind_icon_block, wind_forecast_chart_block] if b] or None,
     ),
     gray_caption(wind_source_text),
+    link_paragraph("Full wind data →", f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&hourly=windspeed_10m,winddirection_10m&timezone=auto"),
 ]
  
 tide_card = [
@@ -3605,6 +3617,24 @@ if water_level_chart_bytes:
         print("WATER LEVEL CHART NOTION UPLOAD FAILED:", e)
         water_level_chart_caption = "Water level chart generated but upload to Notion failed — see Action logs."
  
+# Built as a standalone list rather than appended directly to `blocks`,
+# since this section needs to appear visually ABOVE "Today's Conditions"
+# (per explicit request — full width, above the Tide card, with the full
+# 10-day forecast), even though the underlying data isn't ready until
+# this much later point in the script's actual execution order. Spliced
+# into `blocks` at the right position once both this list and the
+# Today's-Conditions insertion point both exist — see below.
+_total_water_level_blocks = [
+    heading("🌊 Total Water Level — 10-Day Forecast (tide + storm surge)"),
+    callout(water_level_text, emoji="🌊", color="purple_background"),
+]
+if water_level_chart_block:
+    _total_water_level_blocks.append(water_level_chart_block)
+_total_water_level_blocks.append(
+    paragraph(water_level_chart_caption if water_level_chart_bytes else "Water level chart could not be generated — see Action logs.")
+)
+_total_water_level_blocks.append(divider())
+ 
 blocks.append(heading("🛰 Satellite — MODIS True Color"))
 if modis_block:
     blocks.append(modis_block)
@@ -3656,14 +3686,9 @@ blocks.append(callout(marine_text, emoji="⚓", color="purple_background"))
  
 blocks.append(divider())
  
-# --- Row: total water level (Copernicus, tide + storm surge) ---
-blocks.append(heading("🌊 Total Water Level (tide + storm surge)", level=3))
-blocks.append(callout(water_level_text, emoji="🌊", color="purple_background"))
-if water_level_chart_block:
-    blocks.append(water_level_chart_block)
-blocks.append(paragraph(water_level_chart_caption if water_level_chart_bytes else "Water level chart could not be generated — see Action logs."))
- 
-blocks.append(divider())
+# --- Total Water Level moved to appear above "Today's Conditions" —
+# see _total_water_level_blocks built later (once the data is ready) and
+# spliced into `blocks` near the top, right before the card grid. ---
  
 # =========================================================
 # HISTORICAL / TREND SECTIONS (past data, distinct from the forecast
@@ -3716,6 +3741,15 @@ print("EXISTING BLOCK COUNT:", len(existing["results"]))
 for b in existing["results"]:
     notion.blocks.delete(block_id=b["id"])
  
+# Splice the Total Water Level section in at the position recorded
+# earlier (right before "Today's Conditions"), now that both the section
+# itself and the insertion index are available. List slicing here is
+# safe and simple — `blocks` is a plain Python list, and inserting a
+# sub-list at a saved index doesn't care that the section's underlying
+# data was only fetched much later in the script's actual execution
+# order than where it now visually appears.
+blocks = blocks[:_todays_conditions_insertion_index] + _total_water_level_blocks + blocks[_todays_conditions_insertion_index:]
+ 
 # =========================================================
 # UPDATE PAGE
 # =========================================================
@@ -3742,3 +3776,4 @@ else:
 #   netCDF4
 #   notion-client
 #   requests
+ 
