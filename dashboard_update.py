@@ -2450,7 +2450,7 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
     Herschel Island by construction).
  
     points: list of (lat, lon, label) or (lat, lon, label, text_dy_offset)
-    tuples. Defaults to Herschel Island and Shingle Point if not given.
+    tuples. Defaults to Shingle Point, Herschel Island, Aklavik, and Inuvik if not given.
  
     The scale bar uses a uniform meters-per-pixel value, valid since
     rotation preserves distances and the frame is centered consistently.
@@ -2461,8 +2461,10 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
     """
     if points is None:
         points = [
-            (69.568861, -138.911754, "Qikiqtaruk Herschel Island", -28),
-            (68.989, -137.345, "Shingle Point", -10),
+            (68.933333, -137.2, "Shingle Point", -28),
+            (69.568861, -138.911754, "Qikiqtaruk Herschel Island", -10),
+            (68.226653, -135.003294, "Aklavik", -10),
+            (68.360741, -133.723022, "Inuvik", -10),
         ]
  
     try:
