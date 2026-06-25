@@ -360,6 +360,36 @@ def external_image_block(url):
     }
  
  
+def fetch_and_convert_logo_to_png(svg_url, output_width=120):
+    """
+    Fetches an SVG logo and converts it to a fixed-pixel-width PNG, rather
+    than embedding the SVG directly. The AWI logo, embedded as a raw SVG
+    via external_image_block(), rendered far too large on mobile while
+    looking correct on desktop — Notion has no per-block image size
+    control, and scales images to fill the container, which apparently
+    interacts unpredictably with an SVG's own internal viewBox sizing
+    across different device renderers. A fixed-pixel PNG, uploaded via
+    the same pipeline as every chart on this page, gives genuine, precise
+    size control independent of any of that.
+ 
+    Returns PNG bytes, or None on failure (e.g. network issue, or the
+    cairosvg dependency not being installed — this is wrapped so a
+    problem here never blocks the rest of the dashboard from updating).
+    """
+    try:
+        import cairosvg
+ 
+        resp = requests.get(svg_url, timeout=15)
+        resp.raise_for_status()
+ 
+        png_bytes = cairosvg.svg2png(bytestring=resp.content, output_width=output_width)
+        return png_bytes
+ 
+    except Exception as e:
+        print("LOGO SVG-TO-PNG CONVERSION FAILED:", e)
+        return None
+ 
+ 
 def fig_to_png_bytes(fig):
     """Renders a matplotlib figure to PNG bytes in memory, then closes it."""
     buf = io.BytesIO()
@@ -3243,7 +3273,19 @@ water_level_chart_block = None
 # =========================================================
 AWI_LOGO_URL = "https://www.awi.de/_assets/978631966794c5093250775de182779d/Images/AWI/awi_logo.svg"
  
-logo_column = [external_image_block(AWI_LOGO_URL)]
+logo_png_bytes = fetch_and_convert_logo_to_png(AWI_LOGO_URL, output_width=120)
+logo_block = None
+if logo_png_bytes:
+    try:
+        uid = upload_image_to_notion(logo_png_bytes, "awi_logo.png")
+        logo_block = image_block_from_upload(uid)
+    except Exception as e:
+        print("AWI LOGO NOTION UPLOAD FAILED:", e)
+ 
+# Fall back to the original external SVG embed only if the fetch/convert
+# step itself failed — better to show something (even if oversized on
+# mobile) than nothing at all.
+logo_column = [logo_block] if logo_block else [external_image_block(AWI_LOGO_URL)]
 attribution_column = [
     paragraph(
         "This dashboard is provided by the Alfred Wegener Institute Helmholtz Centre "
@@ -3883,4 +3925,3 @@ else:
 #   netCDF4
 #   notion-client
 #   requests
- 
