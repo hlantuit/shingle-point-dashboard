@@ -5,6 +5,7 @@ import json
 import math
 import time
 import requests
+import numpy as np
 from datetime import datetime, timedelta, date, timezone
 from zoneinfo import ZoneInfo
 from notion_client import Client
@@ -3069,7 +3070,7 @@ def fetch_copernicus_water_level():
  
         if nearby.size == 0:
             print("COPERNICUS WATER LEVEL: no grid cells found near Herschel Island in this window")
-            return None, None
+            return None, None, None
  
         # Vectorized validity check across the WHOLE x/y grid at once,
         # instead of 1,000+ individual .sel() calls in a Python loop (each
@@ -3095,7 +3096,7 @@ def fetch_copernicus_water_level():
  
         if best_point is None:
             print("COPERNICUS WATER LEVEL: no valid (non-NaN) grid cells found near Herschel Island")
-            return None, None
+            return None, None, None
  
         print(f"COPERNICUS WATER LEVEL: using grid cell at distance {best_dist:.0f}m from Herschel Island")
         point = nearby.sel(x=best_point[0], y=best_point[1])
@@ -3117,14 +3118,33 @@ def fetch_copernicus_water_level():
             print("COPERNICUS WATER LEVEL: selected cell had no valid values in this time window")
             return None, None
  
-        return times_clean, values_clean
+        # Compute a real yearly mean from the past 365 days at this SAME
+        # validated good cell (not the 10-day forecast window above) —
+        # the dataset's confirmed historical range starts 2018, so a full
+        # past year of real data is genuinely available here, from the
+        # same already-open dataset, no new data source needed.
+        yearly_mean = None
+        try:
+            year_start = now - timedelta(days=365)
+            year_point = ds["zos"].sel(x=best_point[0], y=best_point[1]).sel(time=slice(year_start, now))
+            year_values = year_point.values.flatten()
+            year_values_clean = year_values[~np.isnan(year_values)]
+            if len(year_values_clean) > 0:
+                yearly_mean = float(np.mean(year_values_clean))
+                print(f"COPERNICUS WATER LEVEL: yearly mean computed from {len(year_values_clean)} valid points: {yearly_mean:.3f}m")
+            else:
+                print("COPERNICUS WATER LEVEL: no valid data in past-year window for mean calculation")
+        except Exception as e:
+            print("COPERNICUS WATER LEVEL: yearly mean calculation failed:", e)
+ 
+        return times_clean, values_clean, yearly_mean
  
     except Exception as e:
         print("COPERNICUS WATER LEVEL FETCH FAILED:", e)
-        return None, None
+        return None, None, None
  
  
-def build_water_level_chart(times, values):
+def build_water_level_chart(times, values, yearly_mean=None):
     if not times or not values:
         return None, "Total water level chart unavailable — no data."
  
@@ -3135,6 +3155,7 @@ def build_water_level_chart(times, values):
  
         NOTION_PURPLE = "#9065B0"
         NOTION_RED = "#E16259"
+        NOTION_GRAY_LINE = "#9B9A97"
         NOTION_TEXT_GRAY = "#787774"
         NOTION_LIGHT_GRID = "#EDECEC"
  
@@ -3147,6 +3168,15 @@ def build_water_level_chart(times, values):
         ax.plot(hours, values, linewidth=2.5, color=NOTION_PURPLE, zorder=2)
         ax.plot([hours[0]], [values[0]], marker="o", markersize=8,
                  color=NOTION_RED, markeredgecolor="white", markeredgewidth=1.5, zorder=3)
+ 
+        # Yearly mean reference line — a real long-term average computed
+        # from the past 365 days of actual data at this same grid cell
+        # (not the 10-day forecast window itself), so the forecast curve
+        # can be visually compared against typical conditions.
+        if yearly_mean is not None:
+            ax.axhline(yearly_mean, color=NOTION_GRAY_LINE, linewidth=1.5, linestyle="--", zorder=1.5)
+            ax.text(max(hours) * 0.99, yearly_mean, f" {yearly_mean:.2f}m avg (past year)",
+                    color=NOTION_GRAY_LINE, fontsize=8, va="bottom", ha="right")
  
         for spine in ["top", "right", "left"]:
             ax.spines[spine].set_visible(False)
@@ -3494,12 +3524,17 @@ def find_latest_sentinel1_date(token, lookback_days=10):
         # Require each candidate's own bbox to genuinely contain Herschel
         # Island with a real safety margin (~30km), not just barely touch
         # the point — the marker dot and its label text need actual image
-        # data underneath them, not the gray "uncovered" background. A
-        # smaller margin (previously 10km) let through scenes whose
-        # actual coverage technically included the point but not enough
-        # surrounding area for the marker/label to render on real data.
-        margin_deg_lat = 30 / 111
-        margin_deg_lon = 30 / (111 * math.cos(math.radians(LAT)))
+        # data underneath them, not the gray "uncovered" background. Now
+        # uses the ACTUAL display half-width (150km, matching the real
+        # image extent requested later), not an arbitrary smaller margin
+        # — testing only a small bubble around the bare center point let
+        # through scenes that covered the center but left large parts of
+        # the actual visible 300km-square frame in the gray, uncovered
+        # area (the original bug you reported).
+        display_half_width_km = 150
+        half_width_deg_lat = display_half_width_km / 111
+        half_width_deg_lon = display_half_width_km / (111 * math.cos(math.radians(LAT)))
+ 
         def _point_in_ring(lon, lat, ring):
             """
             Standard ray-casting point-in-polygon test against a single
@@ -3524,13 +3559,25 @@ def find_latest_sentinel1_date(token, lookback_days=10):
                 j = i
             return inside
  
-        def _point_covered_by_geometry(lon, lat, geometry, margin_deg):
+        def _point_covered_by_geometry(lon, lat, geometry, half_width_deg_lon, half_width_deg_lat, grid_n=5):
             """
-            Checks whether (lon, lat) falls within the geometry with a
-            safety margin, by also testing the four points offset by
-            margin_deg in each cardinal direction — if all five points
-            (center + 4 offsets) are inside, there's real coverage in
-            every direction around the target, not just at the bare point.
+            Checks whether the geometry covers a real grid of points
+            spanning the ACTUAL displayed image extent (a grid_n x grid_n
+            grid across the full half_width in each direction from
+            center), not just a small margin around the bare center
+            point. Requires most of the grid (at least 70%) to be
+            covered, since a long narrow swath can still legitimately
+            clip a corner of the display frame without making the image
+            unusable — but the center region and most of the frame need
+            real data.
+ 
+            This fixes the actual root cause of the earlier bug: the
+            previous version only checked a small 30km bubble around the
+            center, while the real displayed image is 150km half-width
+            (300km square) — a scene could pass that small check while
+            still leaving large parts of the actual visible frame
+            (potentially including where the marker dot and its label
+            render) in the gray, uncovered area.
             """
             if not geometry:
                 return False
@@ -3543,30 +3590,35 @@ def find_latest_sentinel1_date(token, lookback_days=10):
             else:
                 return False
  
+            offsets = [-1.0, -0.5, 0.0, 0.5, 1.0][:grid_n] if grid_n == 5 else \
+                [i / (grid_n - 1) * 2 - 1 for i in range(grid_n)]
+ 
             test_points = [
-                (lon, lat),
-                (lon - margin_deg, lat), (lon + margin_deg, lat),
-                (lon, lat - margin_deg), (lon, lat + margin_deg),
+                (lon + dx * half_width_deg_lon, lat + dy * half_width_deg_lat)
+                for dx in offsets for dy in offsets
             ]
-            for tlon, tlat in test_points:
-                if not any(_point_in_ring(tlon, tlat, ring) for ring in rings):
-                    return False
-            return True
+ 
+            covered_count = sum(
+                1 for tlon, tlat in test_points
+                if any(_point_in_ring(tlon, tlat, ring) for ring in rings)
+            )
+            return covered_count / len(test_points) >= 0.70
  
         covering_features = []
         for f in features:
             geometry = f.get("geometry")
-            if geometry and _point_covered_by_geometry(LON, LAT, geometry, margin_deg_lon):
+            if geometry and _point_covered_by_geometry(LON, LAT, geometry, half_width_deg_lon, half_width_deg_lat):
                 covering_features.append(f)
                 continue
-            # Fallback: bbox-margin approximation, only used if geometry
-            # is missing from this particular feature's response.
+            # Fallback: bbox-coverage approximation, only used if geometry
+            # is missing from this particular feature's response. Same
+            # real display half-width requirement as the geometry check.
             if not geometry:
                 fbbox = f.get("bbox")
                 if fbbox and len(fbbox) >= 4:
                     fminx, fminy, fmaxx, fmaxy = fbbox[0], fbbox[1], fbbox[2], fbbox[3]
-                    if (fminx + margin_deg_lon <= LON <= fmaxx - margin_deg_lon and
-                            fminy + margin_deg_lat <= LAT <= fmaxy - margin_deg_lat):
+                    if (fminx + half_width_deg_lon <= LON <= fmaxx - half_width_deg_lon and
+                            fminy + half_width_deg_lat <= LAT <= fmaxy - half_width_deg_lat):
                         covering_features.append(f)
  
         if not covering_features:
@@ -3718,10 +3770,10 @@ with _TopLevelExecutor(max_workers=3) as _top_level_executor:
         modis_bytes, modis_date = None, None
  
     try:
-        copernicus_times, copernicus_values = _water_level_future.result()
+        copernicus_times, copernicus_values, copernicus_yearly_mean = _water_level_future.result()
     except Exception as e:
         print("WATER LEVEL PARALLEL FETCH FAILED:", e)
-        copernicus_times, copernicus_values = None, None
+        copernicus_times, copernicus_values, copernicus_yearly_mean = None, None, None
  
     try:
         sentinel1_bytes, sentinel1_caption = _sentinel1_future.result()
@@ -3746,7 +3798,7 @@ else:
         "above, which uses DFO's astronomical tide predictions.)"
     )
  
-water_level_chart_bytes, water_level_chart_caption = build_water_level_chart(copernicus_times, copernicus_values)
+water_level_chart_bytes, water_level_chart_caption = build_water_level_chart(copernicus_times, copernicus_values, copernicus_yearly_mean)
  
 modis_block = None
 modis_caption = "No valid MODIS image found in the last 5 days (cloud cover or processing delay)."
@@ -3932,3 +3984,4 @@ else:
 #   netCDF4
 #   notion-client
 #   requests
+ 
