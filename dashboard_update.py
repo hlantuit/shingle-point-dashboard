@@ -1028,13 +1028,13 @@ def build_mini_forecast_strip(days_data):
         import io as _io
  
         n = len(days_data)
-        cell_w, cell_h = 100, 130
+        cell_w, cell_h = 110, 175
         canvas = Image.new("RGBA", (cell_w * n, cell_h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(canvas)
  
         try:
-            font_day = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
-            font_temp = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 15)
+            font_day = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
+            font_temp = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
         except Exception:
             font_day = font_temp = ImageFont.load_default()
  
@@ -1043,17 +1043,17 @@ def build_mini_forecast_strip(days_data):
             icon_bytes = render_weather_icon(d["weathercode"])
             if icon_bytes:
                 icon_img = Image.open(_io.BytesIO(icon_bytes)).convert("RGBA")
-                icon_img = icon_img.resize((64, 64), Image.LANCZOS)
-                canvas.paste(icon_img, (x0 + (cell_w - 64) // 2, 22), icon_img)
+                icon_img = icon_img.resize((76, 76), Image.LANCZOS)
+                canvas.paste(icon_img, (x0 + (cell_w - 76) // 2, 42), icon_img)
  
             day_label = d["day_label"]
             temp_label = f"{d['temp_min']:.0f}–{d['temp_max']:.0f}°"
  
             day_bbox = draw.textbbox((0, 0), day_label, font=font_day)
-            draw.text((x0 + (cell_w - (day_bbox[2] - day_bbox[0])) // 2, 2), day_label, font=font_day, fill=(50, 50, 50))
+            draw.text((x0 + (cell_w - (day_bbox[2] - day_bbox[0])) // 2, 4), day_label, font=font_day, fill=(40, 40, 40))
  
             temp_bbox = draw.textbbox((0, 0), temp_label, font=font_temp)
-            draw.text((x0 + (cell_w - (temp_bbox[2] - temp_bbox[0])) // 2, 95), temp_label, font=font_temp, fill=(70, 70, 70))
+            draw.text((x0 + (cell_w - (temp_bbox[2] - temp_bbox[0])) // 2, 128), temp_label, font=font_temp, fill=(60, 60, 60))
  
         out_buf = _io.BytesIO()
         canvas.save(out_buf, format="PNG")
@@ -2665,13 +2665,64 @@ def annotate_plain_image(png_bytes, points=None, scale_km=50, half_width_m=150_0
             seg_p2 = (p1[0] + (p2[0] - p1[0]) * t1, p1[1] + (p2[1] - p1[1]) * t1)
             draw.line([seg_p1, seg_p2], fill=(255, 255, 255), width=2)
  
-        # --- Scale bar (bottom-left corner) ---
-        px_per_km = 1000 / meters_per_px
-        bar_px = scale_km * px_per_km
-        margin = 30
-        bar_x0 = margin
-        bar_y0 = height_px - margin - 10
-        bar_x1 = bar_x0 + bar_px
+        # --- Coastline overlay, in white (annotate_plain_image only —
+        # i.e. the Sentinel-1/radar image, where seeing the true
+        # coastline against the SAR backscatter is genuinely useful,
+        # unlike MODIS's true-color photo where the coastline is usually
+        # already visible). Uses Natural Earth's public-domain 1:50m
+        # scale coastline (a real, verified GeoJSON structure: a
+        # FeatureCollection of LineString features, each with its own
+        # small bbox), filtered down to just the handful of line
+        # segments that actually fall within our small display extent
+        # before projecting/drawing — the full file is small enough
+        # (under ~500KB at this scale) to fetch fresh each run.
+        try:
+            coastline_lon_min = lon - (half_width_m / 111_000) * 1.5
+            coastline_lon_max = lon + (half_width_m / 111_000) * 1.5
+            coastline_lat_min = lat - (half_width_m / 111_000) * 1.5
+            coastline_lat_max = lat + (half_width_m / 111_000) * 1.5
+ 
+            coast_resp = requests.get(
+                "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_coastline.geojson",
+                timeout=20,
+            )
+            coast_resp.raise_for_status()
+            coast_geojson = coast_resp.json()
+ 
+            segments_drawn = 0
+            for feature in coast_geojson.get("features", []):
+                fbbox = feature.get("bbox")
+                if fbbox:
+                    fminx, fminy, fmaxx, fmaxy = fbbox
+                    # Skip features whose own bbox doesn't overlap our
+                    # display extent at all — cheap rejection before
+                    # touching the (potentially long) coordinate list.
+                    if (fmaxx < coastline_lon_min or fminx > coastline_lon_max or
+                            fmaxy < coastline_lat_min or fminy > coastline_lat_max):
+                        continue
+ 
+                geom = feature.get("geometry", {})
+                if geom.get("type") != "LineString":
+                    continue
+ 
+                coords = geom.get("coordinates", [])
+                prev_px = None
+                for coord_lon, coord_lat in coords:
+                    if not (coastline_lon_min <= coord_lon <= coastline_lon_max and
+                            coastline_lat_min <= coord_lat <= coastline_lat_max):
+                        prev_px = None  # break the line when it exits our extent
+                        continue
+                    px = project_point(coord_lat, coord_lon)
+                    if prev_px is not None:
+                        draw.line([prev_px, px], fill=(255, 255, 255), width=2)
+                        segments_drawn += 1
+                    prev_px = px
+ 
+            print(f"SENTINEL-1 COASTLINE: drew {segments_drawn} line segments")
+        except Exception as e:
+            print("SENTINEL-1 COASTLINE OVERLAY FAILED (continuing without it):", e)
+ 
+ 
  
         draw.line([(bar_x0, bar_y0), (bar_x1, bar_y0)], fill=(255, 255, 255), width=4)
         draw.line([(bar_x0, bar_y0 - 6), (bar_x0, bar_y0 + 6)], fill=(255, 255, 255), width=4)
@@ -4004,11 +4055,11 @@ blocks.append(divider())
 blocks.append(disclaimer_paragraph(
     "Disclaimer: All data and imagery on this page are collated from external third-party sources "
     "(including NASA GIBS/EOSDIS, Open-Meteo, sunrise-sunset.org, Environment Canada, DFO/CHS, "
-    "the Norwegian Meteorological Institute, and Copernicus Sentinel Hub/Data Space Ecosystem) and "
-    "are displayed here for general informational purposes only. We hold no responsibility for "
-    "the accuracy, completeness, or timeliness of this data, and this page is not a substitute for "
-    "official sources. Do not use this information for navigation, safety-critical decisions, or any "
-    "other purpose where inaccurate or delayed data could cause harm."
+    "the Norwegian Meteorological Institute, Copernicus Sentinel Hub/Data Space Ecosystem, and "
+    "Natural Earth) and are displayed here for general informational purposes only. We hold no "
+    "responsibility for the accuracy, completeness, or timeliness of this data, and this page is "
+    "not a substitute for official sources. Do not use this information for navigation, "
+    "safety-critical decisions, or any other purpose where inaccurate or delayed data could cause harm."
 ))
  
 # =========================================================
