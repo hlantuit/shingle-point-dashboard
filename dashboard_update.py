@@ -3272,7 +3272,18 @@ def build_water_level_chart(times, values, yearly_mean=None):
         # horizontal line rather than needing its own value label.
         if yearly_mean is not None:
             ax.axhline(0, color=NOTION_GRAY_LINE, linewidth=1.5, linestyle="--", zorder=1.5)
-            place_reference_line_label(ax, hours, plot_values, f"yearly avg ({yearly_mean:.2f}m)", NOTION_GRAY_LINE)
+            # The label's Y position uses axes-fraction coordinates (a
+            # fixed spot near the top of the plot area) rather than the
+            # actual data value 0 -- the relative-to-mean curve regularly
+            # crosses zero, including near the right edge where the label
+            # sits horizontally, which previously made the label overlap
+            # and become unreadable against the curve. Axes-fraction
+            # positioning is independent of the data's actual shape, so
+            # this can't happen regardless of how the forecast looks.
+            ax.text(0.99, 0.97, f"yearly avg ({yearly_mean:.2f}m)",
+                    color=NOTION_GRAY_LINE, fontsize=8, va="top", ha="right",
+                    transform=ax.transAxes,
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.75))
  
         for spine in ["top", "right", "left"]:
             ax.spines[spine].set_visible(False)
