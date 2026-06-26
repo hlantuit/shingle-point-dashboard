@@ -1,5 +1,3 @@
-
- 
 import os
 import io
 import json
@@ -2439,178 +2437,8 @@ def latlon_to_utm(lat_deg, lon_deg, zone=SENTINEL1_UTM_ZONE):
         y += 10000000.0
  
     return x, y
- 
- 
-def utm_to_latlon_vectorized(x, y, zone=SENTINEL1_UTM_ZONE, northern=True):
-    """
-    Standard inverse UTM projection (WGS84), vectorized with numpy so an
-    entire pixel grid can be transformed in one call rather than needing
-    a Python-level loop per pixel -- used by fetch_gibs_coastline_overlay
-    below to reproject NASA GIBS's Coastlines layer (only available from
-    GIBS in EPSG:4326/3857/3413/3031, none of which is north-up at this
-    longitude without extra rotation, unlike UTM zone 7N which already
-    is) into this script's existing UTM-7N Sentinel-1 frame.
- 
-    Standard closed-form inverse formulas (e.g. Snyder, "Map Projections
-    -- A Working Manual", USGS Professional Paper 1395), matched to the
-    same WGS84 ellipsoid constants and false easting/northing convention
-    as latlon_to_utm above, and round-trip verified against it to
-    sub-2-centimeter precision across several test points spanning this
-    project's area of interest.
-    """
-    a = 6378137.0
-    f = 1 / 298.257223563
-    e2 = f * (2 - f)
-    e4 = e2 ** 2
-    e6 = e2 ** 3
-    k0 = 0.9996
-    e1 = (1 - math.sqrt(1 - e2)) / (1 + math.sqrt(1 - e2))
- 
-    x = np.asarray(x, dtype=np.float64) - 500000.0
-    y = np.asarray(y, dtype=np.float64)
-    if not northern:
-        y = y - 10000000.0
- 
-    lon0 = math.radians((zone - 1) * 6 - 180 + 3)
- 
-    M = y / k0
-    mu = M / (a * (1 - e2 / 4 - 3 * e4 / 64 - 5 * e6 / 256))
- 
-    phi1 = (mu
-            + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * np.sin(2 * mu)
-            + (21 * e1 ** 2 / 16 - 55 * e1 ** 4 / 32) * np.sin(4 * mu)
-            + (151 * e1 ** 3 / 96) * np.sin(6 * mu))
- 
-    e2p = e2 / (1 - e2)
-    C1 = e2p * np.cos(phi1) ** 2
-    T1 = np.tan(phi1) ** 2
-    N1 = a / np.sqrt(1 - e2 * np.sin(phi1) ** 2)
-    R1 = a * (1 - e2) / (1 - e2 * np.sin(phi1) ** 2) ** 1.5
-    D = x / (N1 * k0)
- 
-    lat = phi1 - (N1 * np.tan(phi1) / R1) * (
-        D ** 2 / 2
-        - (5 + 3 * T1 + 10 * C1 - 4 * C1 ** 2 - 9 * e2p) * D ** 4 / 24
-        + (61 + 90 * T1 + 298 * C1 + 45 * T1 ** 2 - 252 * e2p - 3 * C1 ** 2) * D ** 6 / 720
-    )
- 
-    lon = lon0 + (
-        D
-        - (1 + 2 * T1 + C1) * D ** 3 / 6
-        + (5 - 2 * C1 + 28 * T1 - 3 * C1 ** 2 + 8 * e2p + 24 * T1 ** 2) * D ** 5 / 120
-    ) / np.cos(phi1)
- 
-    return np.degrees(lon), np.degrees(lat)
- 
- 
-def fetch_gibs_coastline_overlay(center_lat, center_lon, half_width_m, output_size_px):
-    """
-    Fetches NASA GIBS's Coastlines layer -- the same coastline data
-    already used on the MODIS image via GIBS's WMS -- as a standalone
-    transparent PNG, then reprojects it into this script's UTM-7N
-    Sentinel-1 frame.
- 
-    GIBS's WMS officially supports exactly four projections: EPSG:4326,
-    3857, 3413, and 3031 -- UTM zone 7N is not among them, so the layer
-    can't be requested pre-aligned to the Sentinel-1 image directly.
-    EPSG:4326 (plain lat/lon) is the most reliable projection for GIBS's
-    vector-based layers specifically (NASA's own documentation notes
-    some vector products are unavailable in EPSG:3857), so this fetches
-    in EPSG:4326 and reprojects the resulting image into UTM-7N pixel
-    space using the inverse-UTM function above -- the same general
-    approach as rotate_to_north_up's pixel remapping for MODIS, just
-    between two different projections rather than a simple rotation.
- 
-    The reprojection is fully vectorized with numpy (one transform call
-    over the whole output pixel grid, not a per-pixel Python loop),
-    which keeps this fast enough for a ~1.5 megapixel image (under 2
-    seconds in testing) despite doing real per-pixel inverse-projection
-    math.
- 
-    Returns an RGBA PIL Image with a transparent background and white
-    coastlines, the same size as the target Sentinel-1 frame, ready to
-    be alpha-composited directly onto it -- or None if the fetch or
-    reprojection fails for any reason, so a problem here never blocks
-    the rest of the Sentinel-1 image from being shown.
-    """
-    try:
-        # EPSG:4326 bounding box around the center point, sized generously
-        # (2x the requested half-width) so the reprojected UTM frame's
-        # corners -- which extend further in lon/lat terms than its
-        # center does, since UTM-7N's "square" isn't square in lat/lon --
-        # are still covered by the fetched source image.
-        deg_per_m_lat = 1 / 111_000
-        deg_per_m_lon = 1 / (111_000 * math.cos(math.radians(center_lat)))
-        fetch_half_width_m = half_width_m * 2
-        lat_min = center_lat - fetch_half_width_m * deg_per_m_lat
-        lat_max = center_lat + fetch_half_width_m * deg_per_m_lat
-        lon_min = center_lon - fetch_half_width_m * deg_per_m_lon
-        lon_max = center_lon + fetch_half_width_m * deg_per_m_lon
- 
-        fetch_size_px = output_size_px  # same pixel density as the target frame
-        params = {
-            "SERVICE": "WMS",
-            "REQUEST": "GetMap",
-            "VERSION": "1.1.1",
-            "LAYERS": "Coastlines",
-            "STYLES": "",
-            "FORMAT": "image/png",
-            "TRANSPARENT": "true",
-            "WIDTH": str(fetch_size_px),
-            "HEIGHT": str(fetch_size_px),
-            "SRS": "EPSG:4326",
-            "BBOX": f"{lon_min},{lat_min},{lon_max},{lat_max}",
-        }
-        base = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
-        url = base + "?" + "&".join(f"{k}={v}" for k, v in params.items())
- 
-        resp = get_with_retry(url, timeout=20, retries=2, backoff_seconds=5)
-        from PIL import Image as _Image
-        import io as _io3
-        src_img = _Image.open(_io3.BytesIO(resp.content)).convert("RGBA")
-        src_arr = np.array(src_img)
- 
-        # Build the full output pixel grid (UTM-7N meters), then invert
-        # to lon/lat, then map into the source image's pixel space --
-        # all vectorized, no per-pixel Python loop.
-        center_x_utm, center_y_utm = latlon_to_utm(center_lat, center_lon)
-        meters_per_px = (half_width_m * 2) / output_size_px
- 
-        out_y_idx, out_x_idx = np.meshgrid(
-            np.arange(output_size_px), np.arange(output_size_px), indexing="ij"
-        )
-        dx_m = (out_x_idx - output_size_px / 2) * meters_per_px
-        dy_m = (output_size_px / 2 - out_y_idx) * meters_per_px
-        utm_x = center_x_utm + dx_m
-        utm_y = center_y_utm + dy_m
- 
-        lon_grid, lat_grid = utm_to_latlon_vectorized(utm_x.ravel(), utm_y.ravel())
-        lon_grid = lon_grid.reshape(utm_x.shape)
-        lat_grid = lat_grid.reshape(utm_y.shape)
- 
-        src_x_idx = ((lon_grid - lon_min) / (lon_max - lon_min) * fetch_size_px).astype(int)
-        src_y_idx = ((lat_max - lat_grid) / (lat_max - lat_min) * fetch_size_px).astype(int)
- 
-        valid_mask = (
-            (lon_grid >= lon_min) & (lon_grid <= lon_max) &
-            (lat_grid >= lat_min) & (lat_grid <= lat_max) &
-            (src_x_idx >= 0) & (src_x_idx < fetch_size_px) &
-            (src_y_idx >= 0) & (src_y_idx < fetch_size_px)
-        )
- 
-        output_arr = np.zeros((output_size_px, output_size_px, 4), dtype=np.uint8)
-        output_arr[valid_mask] = src_arr[src_y_idx[valid_mask], src_x_idx[valid_mask]]
- 
-        non_transparent = int((output_arr[:, :, 3] > 0).sum())
-        print(f"GIBS COASTLINE OVERLAY: fetched and reprojected, {non_transparent} non-transparent pixels")
- 
-        return _Image.fromarray(output_arr, mode="RGBA")
- 
-    except Exception as e:
-        print("GIBS COASTLINE OVERLAY FETCH/REPROJECT FAILED (continuing without it):", e)
-        return None
- 
- 
+
+
  
  
 _HERSCHEL_UTM_X, _HERSCHEL_UTM_Y = latlon_to_utm(LAT, LON)
@@ -2821,26 +2649,66 @@ def annotate_plain_image(png_bytes, points=None, scale_km=50, half_width_m=150_0
         # i.e. the Sentinel-1/radar image, where seeing the true
         # coastline against the SAR backscatter is genuinely useful,
         # unlike MODIS's true-color photo where the coastline is usually
-        # already visible). Uses the same NASA GIBS Coastlines layer
-        # already used on the MODIS image (see fetch_gibs_coastline_overlay
-        # above), reprojected from GIBS's EPSG:4326 into this image's
-        # UTM-7N frame, rather than a separately-sourced, much coarser
-        # global coastline dataset.
+        # already visible).
+        #
+        # Uses a small, pre-filtered local extract of OpenStreetMap's
+        # natural=coastline data (coastline_data.geojson, committed to
+        # this repo -- see README for how it was generated), rather than
+        # fetching a global coastline dataset fresh every run.
+        #
+        # This replaced two earlier approaches, in order:
+        #   1. Natural Earth's 1:50m-scale global coastline -- too
+        #      coarse for this delta's small channels and bars.
+        #   2. NASA GIBS's rasterized Coastlines WMS layer, reprojected
+        #      into this image's UTM-7N frame -- technically worked, but
+        #      produced visibly pixelated/blocky lines (a rasterize-then
+        #      resample pipeline is inherently lossier than drawing
+        #      vector lines directly), and GIBS's generic "Coastlines"
+        #      layer includes river/delta channel boundaries alongside
+        #      the true outer coast, which looked cluttered and busy in
+        #      this specific low-relief, multi-channel delta environment.
+        #
+        # OSM's natural=coastline tag specifically marks the outer
+        # ocean coast, distinct from inland water features, which avoids
+        # the clutter problem, and drawing it as vector line segments
+        # (like Natural Earth before it) avoids the pixelation problem --
+        # both fixed by switching data source AND going back to direct
+        # vector drawing rather than image compositing.
         try:
-            coastline_overlay = fetch_gibs_coastline_overlay(
-                center_lat=LAT, center_lon=LON,
-                half_width_m=half_width_m, output_size_px=width_px,
+            coastline_lon_min = LON - (half_width_m / 111_000) * 1.5
+            coastline_lon_max = LON + (half_width_m / 111_000) * 1.5
+            coastline_lat_min = LAT - (half_width_m / 111_000) * 1.5
+            coastline_lat_max = LAT + (half_width_m / 111_000) * 1.5
+
+            coastline_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "coastline_data.geojson"
             )
-            if coastline_overlay is not None:
-                img.paste(coastline_overlay, (0, 0), mask=coastline_overlay)
-                # draw was bound to img before this paste -- Image.paste
-                # modifies img in place, so draw (and every annotation
-                # already made or still to come through it) continues to
-                # operate on the same, now-updated image with no rebinding
-                # needed.
+            with open(coastline_path) as _f:
+                coast_geojson = json.load(_f)
+
+            segments_drawn = 0
+            for feature in coast_geojson.get("features", []):
+                geom = feature.get("geometry", {})
+                if geom.get("type") != "LineString":
+                    continue
+
+                coords = geom.get("coordinates", [])
+                prev_px = None
+                for coord_lon, coord_lat in coords:
+                    if not (coastline_lon_min <= coord_lon <= coastline_lon_max and
+                            coastline_lat_min <= coord_lat <= coastline_lat_max):
+                        prev_px = None  # break the line when it exits our extent
+                        continue
+                    px = project_point(coord_lat, coord_lon)
+                    if prev_px is not None:
+                        draw.line([prev_px, px], fill=(255, 255, 255), width=2)
+                        segments_drawn += 1
+                    prev_px = px
+
+            print(f"SENTINEL-1 COASTLINE: drew {segments_drawn} line segments from local OSM extract")
         except Exception as e:
             print("SENTINEL-1 COASTLINE OVERLAY FAILED (continuing without it):", e)
- 
+
         for point in points:
             if len(point) == 5:
                 lat, lon, label_text, text_dy, text_dx = point
@@ -3485,13 +3353,13 @@ NAPOIAK_URL = (
     f"https://dd.weather.gc.ca/today/hydrometric/csv/{NAPOIAK_PROVTERR}/daily/"
     f"{NAPOIAK_PROVTERR}_{NAPOIAK_STATION_ID}_daily_hydrometric.csv"
 )
- 
- 
+
+
 def fetch_napoiak_water_level():
     """
     Fetches the last ~30 days of daily water level (m) for the Napoiak
     Channel station from ECCC's public hydrometric CSV datamart.
- 
+
     Returns (times, values_m) as parallel lists (naive local datetimes,
     UTC-offset suffix stripped since a once-per-day value doesn't need
     timezone math for a 30-day chart), or (None, None) on failure, so a
@@ -3503,9 +3371,9 @@ def fetch_napoiak_water_level():
         # practice), suggesting shared underlying infrastructure -- same
         # retry treatment as the marine forecast fetch above.
         resp = get_with_retry(NAPOIAK_URL, timeout=20, retries=2, backoff_seconds=5)
- 
+
         import csv as _csv
- 
+
         # First line is a bilingual header, not data — skip it.
         lines = resp.text.splitlines()
         print(f"NAPOIAK DEBUG: fetched {len(resp.content)} bytes, {len(lines)} lines total")
@@ -3513,9 +3381,9 @@ def fetch_napoiak_water_level():
             print(f"NAPOIAK DEBUG: header line: {lines[0]!r}")
         for sample_row in lines[1:4]:
             print(f"NAPOIAK DEBUG: sample data row: {sample_row!r}")
- 
+
         reader = _csv.reader(lines[1:])
- 
+
         times = []
         values_m = []
         rows_seen = 0
@@ -3543,51 +3411,51 @@ def fetch_napoiak_water_level():
                 continue
             times.append(t)
             values_m.append(v)
- 
+
         print(f"NAPOIAK DEBUG: rows_seen={rows_seen}, rows_too_short={rows_too_short}, "
               f"rows_empty_level={rows_empty_level}, rows_parse_failed={rows_parse_failed}, "
               f"rows_kept={len(values_m)}")
- 
+
         if not values_m:
             print("NAPOIAK: fetch succeeded but no usable water level values found in CSV "
                   "— see NAPOIAK DEBUG lines above for the actual column layout")
             return None, None
- 
+
         print(f"NAPOIAK: parsed {len(values_m)} daily values from {NAPOIAK_URL}")
         return times, values_m
- 
+
     except Exception as e:
         print("NAPOIAK FETCH FAILED:", e)
         return None, None
- 
- 
+
+
 def build_napoiak_chart(times, values_m):
     if not times or not values_m:
         return None, "Napoiak Channel water level chart unavailable — no data."
- 
+
     try:
         t0 = times[0]
         hours = [(t - t0).total_seconds() / 3600 for t in times]
- 
+
         NOTION_GREEN = "#4F9768"
         NOTION_RED = "#E16259"
         NOTION_TEXT_GRAY = "#787774"
         NOTION_LIGHT_GRID = "#EDECEC"
- 
+
         plt.rcParams["font.family"] = "DejaVu Sans"
         fig, ax = plt.subplots(figsize=(5.5, 3.2), dpi=150)
         fig.patch.set_alpha(0)
         ax.set_facecolor("none")
- 
+
         ax.fill_between(hours, values_m, min(values_m), color=NOTION_GREEN, alpha=0.12, linewidth=0, zorder=1)
         ax.plot(hours, values_m, linewidth=2.5, color=NOTION_GREEN, zorder=2)
         ax.plot([hours[-1]], [values_m[-1]], marker="o", markersize=8,
                  color=NOTION_RED, markeredgecolor="white", markeredgewidth=1.5, zorder=3)
- 
+
         for spine in ["top", "right", "left"]:
             ax.spines[spine].set_visible(False)
         ax.spines["bottom"].set_color(NOTION_LIGHT_GRID)
- 
+
         ax.set_xlim(0, max(hours))
         tick_hours = list(range(0, int(max(hours)) + 1, 5 * 24))  # every 5 days, to avoid crowding over a 30-day span
         tick_labels = [(t0 + timedelta(hours=h)).strftime("%b %d") for h in tick_hours]
@@ -3599,7 +3467,7 @@ def build_napoiak_chart(times, values_m):
         ax.xaxis.grid(False)
         ax.set_axisbelow(True)
         ax.set_ylabel("Water level (m)", fontsize=10, color=NOTION_TEXT_GRAY)
- 
+
         fig.tight_layout()
         png_bytes = fig_to_png_bytes(fig)
         span_days = round(max(hours) / 24)
@@ -3610,11 +3478,11 @@ def build_napoiak_chart(times, values_m):
             f"Source: ECCC Water Survey of Canada, station {NAPOIAK_STATION_ID} (real-time, preliminary/unreviewed)."
         )
         return png_bytes, caption
- 
+
     except Exception as e:
         print("NAPOIAK CHART FAILED:", e)
         return None, "Napoiak Channel water level chart could not be generated — see Action logs."
- 
+
 # water_level_chart_bytes/caption are built later, right after the
 # parallel executor block produces copernicus_times/copernicus_values.
  
@@ -4249,7 +4117,7 @@ with _TopLevelExecutor(max_workers=4) as _top_level_executor:
         print("SENTINEL-1 PARALLEL FETCH FAILED:", e)
         sentinel1_bytes = None
         sentinel1_caption = "Sentinel-1 SAR image unavailable — fetch failed. Check Action logs."
- 
+
     try:
         napoiak_times, napoiak_values = _napoiak_future.result()
     except Exception as e:
@@ -4311,7 +4179,7 @@ _total_water_level_blocks.append(
     paragraph(water_level_chart_caption if water_level_chart_bytes else "Water level chart could not be generated — see Action logs.")
 )
 _total_water_level_blocks.append(divider())
- 
+
 napoiak_chart_block = None
 if napoiak_chart_bytes:
     try:
@@ -4320,7 +4188,7 @@ if napoiak_chart_bytes:
     except Exception as e:
         print("NAPOIAK CHART NOTION UPLOAD FAILED:", e)
         napoiak_chart_caption = "Napoiak Channel water level chart generated but upload to Notion failed — see Action logs."
- 
+
 _napoiak_blocks = [
     heading("💧 Napoiak Channel Water Level — Mackenzie River above Shallow Bay"),
 ]
@@ -4330,7 +4198,7 @@ _napoiak_blocks.append(
     paragraph(napoiak_chart_caption if napoiak_chart_bytes else "Napoiak Channel water level chart could not be generated — see Action logs.")
 )
 _napoiak_blocks.append(divider())
- 
+
 _total_water_level_blocks.extend(_napoiak_blocks)
  
 blocks.append(heading("🛰 Satellite View of Shingle Point"))
