@@ -178,7 +178,7 @@ temp_cache_dirty = True  # the prefetch calls above mutate temp_cache in place w
 # =========================================================
 # FETCH — wind vector chart
 # =========================================================
-wind_chart_bytes, wind_chart_caption = lib.build_wind_vector_chart(config.LAT, config.LON, now_utc)
+wind_chart_bytes, wind_rose_bytes, wind_chart_caption = lib.build_wind_charts_combined(config.LAT, config.LON, now_utc)
 
 # =========================================================
 # FETCH — logo
@@ -291,7 +291,7 @@ blocks += lib.build_modis_section(modis_block, modis_caption, modis_date, now_ut
 blocks += lib.build_sentinel1_section(sentinel1_bytes, sentinel1_caption, None, config.SITE_DISPLAY_NAME)
 blocks += lib.build_temperature_chart_section(temp_chart_bytes, temp_chart_caption)
 blocks += lib.build_tdd_histogram_section(tdd_histogram_bytes, tdd_histogram_caption)
-blocks += lib.build_wind_chart_section(wind_chart_bytes, wind_chart_caption)
+blocks += lib.build_wind_chart_section(wind_chart_bytes, wind_chart_caption, rose_bytes=wind_rose_bytes)
 blocks += lib.build_disclaimer_section()
 
 lib.publish_blocks_to_notion(blocks)
