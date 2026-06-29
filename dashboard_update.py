@@ -39,6 +39,15 @@ temp_cache = lib.load_temp_cache()
 temp_cache_dirty = False
 
 # =========================================================
+# FETCH — GEM/GDPS forecast (primary), Open-Meteo as fallback
+# =========================================================
+gem_forecast = lib.fetch_gem_forecast(config.LAT, config.LON, now_utc)
+if gem_forecast:
+    print(f"GEM FORECAST: using source={gem_forecast['source']}")
+else:
+    print("GEM FORECAST: all sources failed, forecast sections will show fallback text")
+
+# =========================================================
 # FETCH — weather, wind, forecast
 # =========================================================
 weather = lib.get_weather(config.LAT, config.LON)
@@ -51,12 +60,12 @@ if weather["status"] == "ok":
         ("Humidity: ", f"{weather['humidity_pct']} %"),
         ("Pressure: ", f"{weather['pressure_hpa']} hPa"),
     ]
-    weather_source_text = "Source: Open-Meteo (ERA5-based forecast/analysis)"
+    weather_source_text = "Source: Open-Meteo (ERA5-based current analysis)"
     wind_now_text = [
         ("Wind speed: ", f"{weather['windspeed_kmh']} km/h"),
         ("Wind direction: ", wind_dir_text),
     ]
-    wind_source_text = "Source: Open-Meteo (ERA5-based forecast/analysis)"
+    wind_source_text = "Source: Open-Meteo (ERA5-based current analysis)"
 else:
     weather_text = "Weather data unavailable — fetch failed. Check Action logs."
     weather_source_text = ""
@@ -105,10 +114,18 @@ if wind_icon_big_bytes:
     except Exception as e:
         print("WIND ICON NOTION UPLOAD FAILED:", e)
 
-land_forecast_days = lib.get_land_forecast(config.LAT, config.LON)
+# Forecast strips: GEM daily → strip format, fall back to Open-Meteo
 mini_forecast_strip_block = None
 large_forecast_strip_bytes = None
 land_forecast_caption = "Land forecast unavailable — fetch failed. Check Action logs."
+
+if gem_forecast:
+    land_forecast_days = lib.gem_daily_to_land_forecast_days(gem_forecast["daily"])
+    land_forecast_source = "GDPS (GEM-seamless)" if gem_forecast["source"] == "gem_seamless" else "Open-Meteo (ECMWF fallback)"
+else:
+    land_forecast_days = lib.get_land_forecast(config.LAT, config.LON)
+    land_forecast_source = "Open-Meteo"
+
 if land_forecast_days:
     mini_strip_days = []
     for d in land_forecast_days:
@@ -125,7 +142,7 @@ if land_forecast_days:
         })
     mini_forecast_strip_bytes = lib.build_mini_forecast_strip(mini_strip_days)
     large_forecast_strip_bytes = lib.build_large_forecast_strip(mini_strip_days)
-    land_forecast_caption = "Source: Open-Meteo"
+    land_forecast_caption = f"Source: {land_forecast_source}"
     if mini_forecast_strip_bytes:
         try:
             uid = lib.upload_image_to_notion(mini_forecast_strip_bytes, "mini_forecast_strip.png")
@@ -133,8 +150,10 @@ if land_forecast_days:
         except Exception as e:
             print("MINI FORECAST STRIP NOTION UPLOAD FAILED:", e)
 
+# Wind forecast mini chart: prefer GEM hourly, fall back to Open-Meteo
+gem_wind_hourly = lib.gem_hourly_wind_forecast(gem_forecast["hourly"], now_utc) if gem_forecast else None
 wind_forecast_chart_bytes, wind_forecast_chart_caption = lib.build_wind_forecast_mini_chart(
-    weather.get("hourly_wind_forecast") if weather["status"] == "ok" else None
+    gem_wind_hourly if gem_wind_hourly else (weather.get("hourly_wind_forecast") if weather["status"] == "ok" else None)
 )
 wind_forecast_chart_block = None
 if wind_forecast_chart_bytes:
@@ -292,6 +311,7 @@ blocks += lib.build_sentinel1_section(sentinel1_bytes, sentinel1_caption, None, 
 blocks += lib.build_temperature_chart_section(temp_chart_bytes, temp_chart_caption)
 blocks += lib.build_tdd_histogram_section(tdd_histogram_bytes, tdd_histogram_caption)
 blocks += lib.build_wind_chart_section(wind_chart_bytes, wind_chart_caption, rose_bytes=wind_rose_bytes)
+blocks += lib.build_gem_forecast_section(gem_forecast, config.TZ_NAME)
 blocks += lib.build_disclaimer_section()
 
 lib.publish_blocks_to_notion(blocks)
