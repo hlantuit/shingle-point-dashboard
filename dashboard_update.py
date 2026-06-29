@@ -65,7 +65,8 @@ if weather["status"] == "ok":
         ("Wind speed: ", f"{weather['windspeed_kmh']} km/h"),
         ("Wind direction: ", wind_dir_text),
     ]
-    wind_source_text = "Source: Open-Meteo (ERA5-based current analysis)"
+    _gem_src = "GDPS (GEM-seamless)" if (gem_forecast and gem_forecast.get("source") == "gem_seamless") else "Open-Meteo (ECMWF fallback)"
+    wind_source_text = f"Current conditions: Open-Meteo (ERA5).  48-hour forecast: {_gem_src}."
 else:
     weather_text = "Weather data unavailable — fetch failed. Check Action logs."
     weather_source_text = ""
