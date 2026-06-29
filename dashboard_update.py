@@ -129,7 +129,7 @@ else:
 
 if land_forecast_days:
     mini_strip_days = []
-    for d in land_forecast_days:
+    for d in land_forecast_days[:5]:
         day_compass = lib.degrees_to_compass(d["wind_dir_deg"])
         wind_label = f"{d['wind_max_kmh']:.0f} km/h {day_compass or ''}".strip()
         precip_label = f"{d['precip_mm']:.1f} mm" + (f" ({d['precip_prob_pct']:.0f}%)" if d.get("precip_prob_pct") is not None else "")
@@ -301,7 +301,7 @@ blocks += lib.build_todays_conditions_section(
     sun_text, sun_chart_bytes, sun_chart_caption,
 )
 blocks += lib.build_active_alerts_section(active_alerts)
-blocks += lib.build_land_forecast_section(large_forecast_strip_bytes, land_forecast_caption)
+blocks += lib.build_gem_forecast_section(gem_forecast, config.TZ_NAME)
 blocks += lib.build_marine_forecast_section(marine_text, marine_source_text, config.MARINE_ZONE_NAME, config.MARINE_ZONE_ID)
 blocks += lib.build_total_water_level_section(water_level_text, water_level_chart_bytes, water_level_chart_caption)
 for station, h_times, h_values in hydrometric_results:
@@ -312,7 +312,6 @@ blocks += lib.build_sentinel1_section(sentinel1_bytes, sentinel1_caption, None, 
 blocks += lib.build_temperature_chart_section(temp_chart_bytes, temp_chart_caption)
 blocks += lib.build_tdd_histogram_section(tdd_histogram_bytes, tdd_histogram_caption)
 blocks += lib.build_wind_chart_section(wind_chart_bytes, wind_chart_caption, rose_bytes=wind_rose_bytes)
-blocks += lib.build_gem_forecast_section(gem_forecast, config.TZ_NAME)
 blocks += lib.build_disclaimer_section()
 
 lib.publish_blocks_to_notion(blocks)
