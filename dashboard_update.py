@@ -81,7 +81,7 @@ wind_icon_bytes = (
 )
 weather_icon_big_bytes = (
     lib.render_icon_with_big_number(
-        weather_icon_bytes, f"{weather['temperature_c']:.0f}", "°C",
+        weather_icon_bytes, lib.fmt_temp(weather['temperature_c']), "°C",
         number_color=lib.temperature_to_color(weather["temperature_c"]),
     )
     if weather_icon_bytes and weather.get("temperature_c") is not None
@@ -281,7 +281,7 @@ water_level_chart_bytes, water_level_chart_caption = lib.build_water_level_chart
     copernicus_times, copernicus_values, config.TZ_NAME, copernicus_yearly_mean,
 )
 water_level_text = (
-    [("Latest forecast value: ", f"{copernicus_values[0]:.2f} m")] if copernicus_values
+    [("Latest forecast value: ", f"{copernicus_values[0]:.2f} m (above geoid, TOPAZ6 model reference level)")] if copernicus_values
     else "Total water level forecast unavailable — fetch failed. Check Action logs."
 )
 
@@ -293,7 +293,7 @@ water_level_text = (
 # =========================================================
 blocks = []
 blocks += lib.build_header_blocks(now_local, logo_url=config.LOGO_URL, logo_png_bytes=logo_png_bytes,
-                                    institution_text=config.INSTITUTION_TEXT)
+                                    institution_text=config.INSTITUTION_TEXT, tz_name=config.TZ_NAME)
 blocks += lib.build_todays_conditions_section(
     weather_text, weather_source_text, weather_icon_block, mini_forecast_strip_block,
     config.LAT, config.LON, wind_now_text, wind_source_text, wind_icon_block, wind_forecast_chart_block,
@@ -308,7 +308,8 @@ for station, h_times, h_values in hydrometric_results:
     h_chart_bytes, h_chart_caption = lib.build_hydrometric_chart(h_times, h_values, station["station_id"], station["river_name"])
     blocks += lib.build_hydrometric_section(h_chart_bytes, h_chart_caption, station["heading"])
 blocks += lib.build_modis_section(modis_block, modis_caption, modis_date, now_utc, config.MODIS_BBOX_3413, config.SITE_DISPLAY_NAME)
-blocks += lib.build_sentinel1_section(sentinel1_bytes, sentinel1_caption, None, config.SITE_DISPLAY_NAME)
+sentinel1_explore_url = f"https://apps.sentinel-hub.com/eo-browser/?zoom=11&lat={config.LAT}&lng={config.LON}&themeId=DEFAULT-THEME"
+blocks += lib.build_sentinel1_section(sentinel1_bytes, sentinel1_caption, sentinel1_explore_url, config.SITE_DISPLAY_NAME)
 blocks += lib.build_temperature_chart_section(temp_chart_bytes, temp_chart_caption)
 blocks += lib.build_tdd_histogram_section(tdd_histogram_bytes, tdd_histogram_caption)
 blocks += lib.build_wind_chart_section(wind_chart_bytes, wind_chart_caption, rose_bytes=wind_rose_bytes)
